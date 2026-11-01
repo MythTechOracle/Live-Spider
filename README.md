@@ -8,7 +8,7 @@ Halloweb is a tiny Windows desktop spider with somewhere to be. Move your pointe
 
 The spider and its silk float over ordinary desktop windows. Their transparent overlays let your clicks reach the apps underneath.
 
-When it crosses an accessible button, a soft amber **hover glow** outlines the control beneath its body. This is Halloweb's own visual effect: it does not move your pointer or send hover, click, or activation events to the app. Controls that do not expose suitable accessibility geometry simply receive no glow.
+**Ghost Pointer** adds passive curiosity while wandering. In a window you explicitly approve, the spider can notice a button or menu item, pause, draw its own faint amber highlight, and continue. It does not move your pointer or send hover, click, or activation events to the app. Unapproved windows receive no accessibility queries.
 
 ## Meet your spider
 
@@ -25,7 +25,7 @@ Halloweb targets **Windows 10 or 11, x64** and uses the .NET Framework included 
 
 Download the Windows ZIP from [Releases](https://github.com/MythTechOracle/Live-Spider/releases), extract it, and double-click **Halloweb.exe**.
 
-The hover glow is part of the **0.2.0 source build**. The published v0.1.0 ZIP does not include it yet.
+Ghost Pointer is part of the **0.3.0 source build**. The published v0.1.0 ZIP does not include it yet.
 
 Right-click the spider icon in the system tray; it may be inside the tray's up-arrow menu.
 
@@ -35,12 +35,16 @@ Right-click the spider icon in the system tray; it may be inside the tray's up-a
 | **Pause / Resume** | Stops or resumes the spider and its construction. Double-clicking the tray icon also toggles pause. |
 | **Bring spider near pointer** | Recalls it to your current display and clears its previous web. |
 | **Show only on desktop** | Hides the overlays while another app has focus. |
-| **Spider hover glow** | Toggles the visual button outline. Enabled at launch; pausing also hides it. |
+| **Ghost Pointer curiosity** | Toggles passive observation and its synthetic highlight. Enabled at launch, with no windows approved. |
+| **Ctrl+Alt+G** | Explicitly approves the currently active window for this session, replacing the previous approval. Available when the shortcut registers successfully. |
+| **Revoke Ghost Pointer window approval** | Immediately clears observation, pending results, and the highlight. |
 | **Spider size** | Chooses Small, Original, or Large. |
 | **Clear web and route memory** | Gives the spider a fresh start. |
 | **Exit spider** | Closes the app. **Ctrl+Alt+Q** also quits when that shortcut is available. |
 
 Run the executable again whenever you want the spider back. It stays on its starting display unless recalled. Exclusive full-screen apps and the Windows secure desktop may cover the overlays.
+
+For Ghost Pointer, select an ordinary non-sensitive application window and press **Ctrl+Alt+G** yourself. Approval is never saved across restarts. Leave the computer quiet until the spider wanders across an eligible control. Threats, returning to a web, and construction take priority over curiosity. Unsupported or uncertain targets receive no highlight.
 
 ## Build from source
 
@@ -64,7 +68,9 @@ Verification also needs Node.js for the independent JavaScript behavior tests. N
 
 Halloweb reads the pointer position locally so the spider can react. It uses Windows' idle-time information without recording keystrokes. Its activity map, web progress, route memory, and recent behavior history stay in memory for the current session. An explicit diagnostic command can export a local history snapshot.
 
-Hover glow uses read-only Windows accessibility queries for control roles, bounds, availability, and process identity. It does not read control names or text, invoke controls, or save a history of the apps beneath the spider.
+Ghost Pointer reads only an approved point's control role, bounds, enabled/offscreen flags, password flag for denial, and process identity. It performs no UI tree search, document or directory reading, file metadata inspection, clipboard inspection, screenshots, text extraction, or network communication. Known shell/security windows and password-marked hits are declined. Geometry cannot identify every sensitive context, so approve only windows you intend to expose to this limited observer.
+
+Its separate curiosity history keeps at most 64 non-sensitive receipts in RAM. `NO_INPUT_DISPATCHED` describes this engine's lack of input capability; it is not a universal guarantee about external application behavior. See [LIVE-SPIDER-12](docs/LIVE-SPIDER-12.md) for the observation boundary and verification scope.
 
 See [Behavior and verification](docs/BEHAVIOR.md) for the movement rules, diagnostic commands, test evidence, and the differences between the Windows app and the JavaScript experiments.
 

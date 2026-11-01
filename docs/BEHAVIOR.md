@@ -66,17 +66,17 @@ Run these commands from the folder containing the executable:
 
 Ledger evidence can include the spider's simulation coordinates, pointer-distance measurements, and current web information. The app reads the global pointer locally and uses Windows' last-input idle information; it does not record the contents of keystrokes. Activity heat and temporary route memory are also session-local.
 
-## Visual hover glow
+## Ghost Pointer curiosity
 
-The glow is a separate small amber overlay around an accessible control under the spider's body. It does not set the app's own hover state. No pointer movement, synthetic input, control invocation, focus request, or hover message is sent to the app underneath.
+LIVE-SPIDER-12 pauses a safe wander to observe an explicitly approved point, shows a small synthetic amber highlight, and then departs. Its states are `EXPLORE`, `TARGET_DETECTED`, `OBSERVE`, `GHOST_HOVER`, and `DEPART`. Real threats, recovery, anchor selection, and weaving retain priority.
 
-Supported roles are buttons, hyperlinks, checkboxes, radio buttons, tabs, and menu items. Disabled, offscreen, excessively large, unavailable, or ambiguous targets produce no glow. Desktop files and text fields are excluded. Some applications expose little accessibility geometry, so this effect will not appear on every button.
+The detector accepts **Button** and **MenuItem** only. Approval defaults to none; the user selects a non-sensitive window and presses **Ctrl+Alt+G** to approve that exact window for this session. The tray can revoke approval. A single worker performs direct point lookup with six cached metadata fields; it makes no tree search, fallback scan, or content query.
 
-One background MTA worker reads only control role, bounding rectangle, enabled/offscreen state, and process identity. It reads no names or text and retains no automation element outside that worker. Requests coalesce into one pending point, start at most ten times per second, and expire after 300 milliseconds. Provider calls cannot delay the spider's animation thread. A hung provider occupies that one background worker; the app does not create replacement threads to chase it.
+Queries begin at most once per 150 ms and expire after 300 ms. Disabled, offscreen, password-marked, unsupported, occluded, unapproved, stale, or unavailable targets produce no glow. Known shell/security classes are blocked. The observer does not read files, file metadata, directories, clipboard contents, screenshots, names, values, text, or documents, and adds no network communication.
 
-The detector excludes Halloweb's own windows and rechecks the visible external window beneath the spider before displaying a result. A bounded fallback handles its transparent overlays without hiding them or moving the pointer. Geometry and window identity checks are conservative; they do not reproduce every application's private hit-testing rules. Missing or uncertain geometry means no glow.
+The overlay never sets the app's hover state or dispatches input, invocation, or focus changes. If point lookup sees Halloweb's own overlay, it declines. A separate bounded RAM ledger records only engine state, fixed reasons, role, tick and sequence. Rendering receipts require the host to acknowledge an actual visible glow. These receipts describe Halloweb's behavior rather than guaranteeing every external application's behavior.
 
-The tray's **Spider hover glow** option is enabled at launch. Switching it off, pausing, hiding the spider, recalling it, or closing the app clears the glow. All three visual overlays use layered, click-through, nonactivating windows.
+See [LIVE-SPIDER-12](LIVE-SPIDER-12.md) for the exact authority boundary, controls, privacy limits and owned-test verification scope.
 
 ## JavaScript reference engine
 
@@ -101,6 +101,8 @@ The recorded verification on **31 October 2026** distinguishes behavior tests fr
 | Existing desktop self-tests | Retain 135 escape scenarios, 432 artwork rotation/size/animation checks, and progressive silk checks. |
 | Real Windows smoke checks | Exercise both layered overlays, click-through and no-activation styles, retained keyboard focus, screen placement, pause/resume, and ledger JSON serialization. |
 | Hover glow checks (1 November 2026) | **40** pure rendering/geometry assertions and **27** target validation/freshness assertions passed. **19** separate real Windows fixture checks verified detection through both overlays, disabled/text/covered/closed controls, no input events during probing, and unchanged pointer/focus. |
+| LIVE-SPIDER-12 pure checks (1 November 2026) | **114** curiosity assertions and **25** native motion priority assertions passed; prior JavaScript/native regression groups also passed. Owned-control runtime results are tracked separately. |
+| LIVE-SPIDER-12 live checks (1 November 2026) | **88** owned-fixture assertions passed, including actual walk/hold/glow/departure, threat preemption, approval/revocation boundaries, native state and input counters, and stationary pointer/foreground. Button tested live; MenuItem classification tested purely. |
 
 These are different groups and units of verification, not a single combined test-case count. The two original JavaScript test files were preserved without weakening their assertions.
 
