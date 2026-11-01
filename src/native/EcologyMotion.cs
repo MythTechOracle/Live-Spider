@@ -102,6 +102,7 @@ namespace SpookyDesktopSpider
         public int RejectedRouteCount { get { return rejectedRoutes.Count; } }
         public int RouteChecks { get; private set; }
         public bool Moving { get { return Speed > 0 && Distance(Position, Target) > Epsilon; } }
+        public bool CuriosityHolding { get; private set; }
 
         public EcologyMotion(PointF start, RectangleF bounds, int seed)
         {
@@ -491,6 +492,11 @@ namespace SpookyDesktopSpider
 
         public void Update(PointF cursor, double deltaTime, double idleSeconds, double scale, double? timestamp)
         {
+            Update(cursor, deltaTime, idleSeconds, scale, timestamp, false);
+        }
+
+        public void Update(PointF cursor, double deltaTime, double idleSeconds, double scale, double? timestamp, bool curiosityHold)
+        {
             ValidatePoint(cursor, "cursor");
             ValidatePoint(Position, "position");
             ValidatePoint(Target, "target");
@@ -519,6 +525,7 @@ namespace SpookyDesktopSpider
             BlockedReason = null;
             DistanceMoved = 0;
             MotionStatus = "IDLE";
+            CuriosityHolding = false;
             Position = Clamp(Position);
             PointF before = Position;
             frameStart = before;
@@ -627,7 +634,11 @@ namespace SpookyDesktopSpider
             }
             string movementState = State;
             double remaining = Distance(Position, Target);
-            if (Speed > 0 && remaining > Epsilon && dt > 0)
+            // Curiosity may delay only a safe wander effect. Real elapsed time,
+            // threat decisions, recovery, anchor selection and weaving still run.
+            CuriosityHolding = curiosityHold && State == "WANDER" && CurrentWeb == null &&
+                PreThreatDistance >= clearance && Speed > 0 && remaining > Epsilon;
+            if (Speed > 0 && remaining > Epsilon && dt > 0 && !CuriosityHolding)
             {
                 if (approvedRoute == null) throw new InvalidOperationException("Motion requires an approved route identity.");
                 double travel = Math.Min(remaining, Speed * dt);

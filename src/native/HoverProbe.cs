@@ -2,18 +2,15 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Automation;
 
 namespace SpookyDesktopSpider
 {
-    internal enum HoverControlKind
-    {
-        Button, Hyperlink, CheckBox, RadioButton, TabItem, MenuItem
-    }
+    internal enum HoverControlKind { Button, MenuItem }
 
-    // A snapshot contains primitive geometry and identity only. No automation
-    // element, provider, control pattern, label, or user content leaves the worker.
+    // No live automation object, text, title, name, or provider is published.
     internal sealed class HoverTarget
     {
         public readonly RectangleF Bounds;
@@ -21,78 +18,76 @@ namespace SpookyDesktopSpider
         public readonly IntPtr RootWindow;
         public readonly int RootProcessId;
         public readonly HoverControlKind Kind;
-        public readonly long CapturedAtTimestamp;
-        public readonly long RequestVersion;
+        public readonly long CapturedAtTimestamp, RequestVersion, ApprovalGeneration;
         public int ProcessId { get { return RootProcessId; } }
         public long ObservedAtTimestamp { get { return CapturedAtTimestamp; } }
 
-        internal HoverTarget(RectangleF bounds, PointF point, IntPtr root, int processId,
-            HoverControlKind kind, long timestamp, long version)
+        internal HoverTarget(RectangleF bounds, PointF point, IntPtr root, int pid, HoverControlKind kind, long timestamp, long version)
+            : this(bounds, point, root, pid, kind, timestamp, version, 0) { }
+
+        internal HoverTarget(RectangleF bounds, PointF point, IntPtr root, int pid, HoverControlKind kind,
+            long timestamp, long version, long approvalGeneration)
         {
-            Bounds = bounds;
-            ProbePoint = point;
-            RootWindow = root;
-            RootProcessId = processId;
-            Kind = kind;
-            CapturedAtTimestamp = timestamp;
-            RequestVersion = version;
+            Bounds = bounds; ProbePoint = point; RootWindow = root; RootProcessId = pid;
+            Kind = kind; CapturedAtTimestamp = timestamp; RequestVersion = version; ApprovalGeneration = approvalGeneration;
         }
 
-        public double AgeMilliseconds
+        public double AgeMilliseconds { get { return HoverProbe.ElapsedMilliseconds(CapturedAtTimestamp, Stopwatch.GetTimestamp()); } }
+        public bool IsFresh(PointF point, IntPtr root) { return IsFresh(point, root, HoverProbe.MaximumAgeMilliseconds); }
+        public bool IsFresh(PointF point, IntPtr root, double maximumAgeMilliseconds)
         {
-            get { return HoverProbe.ElapsedMilliseconds(CapturedAtTimestamp, Stopwatch.GetTimestamp()); }
-        }
-
-        public bool IsFresh(PointF point, IntPtr currentRoot)
-        {
-            return IsFresh(point, currentRoot, HoverProbe.MaximumAgeMilliseconds);
-        }
-
-        public bool IsFresh(PointF point, IntPtr currentRoot, double maximumAgeMilliseconds)
-        {
-            return HoverProbe.IsFinitePoint(point) && HoverProbe.Contains(Bounds, point) &&
-                currentRoot != IntPtr.Zero && currentRoot == RootWindow &&
+            return root != IntPtr.Zero && root == RootWindow && HoverProbe.Contains(Bounds, point) &&
                 HoverProbe.IsFreshTimestamp(CapturedAtTimestamp, Stopwatch.GetTimestamp(), maximumAgeMilliseconds);
         }
     }
 
-    // This detector performs read-only geometry queries. It never delivers input,
-    // invokes a control, changes focus, or asks another application to hover.
+    // LIVE-SPIDER-12: one explicitly approved window, one direct hit, and no
+    // traversal or fallback. Unsupported/obscured hits decline conservatively.
     internal sealed class HoverProbe : IDisposable
     {
         public const double MaximumAgeMilliseconds = 300;
-        public const double MinimumProbeIntervalMilliseconds = 100;
-        public const int MaximumAncestorHops = 6;
-        public const int MaximumFallbackNodes = 96;
-        public const int MaximumFallbackDepth = 6;
-        public const double MaximumTargetWidth = 600;
-        public const double MaximumTargetHeight = 200;
-        public const double MaximumTargetArea = 150000;
+        public const double MinimumProbeIntervalMilliseconds = 150;
+        public const double MaximumTargetWidth = 600, MaximumTargetHeight = 200, MaximumTargetArea = 150000;
         private const double MaximumCoordinate = 1000000;
-        private const double FallbackBudgetMilliseconds = 80;
         private readonly int ownProcessId;
         private readonly object requestLock = new object();
         private readonly AutoResetEvent requestReady = new AutoResetEvent(false);
         private readonly Thread worker;
-        private volatile bool disposed;
-        private volatile bool busy;
+        private volatile bool disposed, busy;
         private bool pending;
         private RequestData latestRequest;
-        private long requestVersion, completedProbes;
+        private Approval approval;
+        private long requestVersion, approvalGeneration, completedProbes, uiaLookups;
         private HoverTarget latest;
+        private string latestOutcome = "DECLINED_UNAPPROVED_WINDOW";
+
+        private sealed class Approval
+        {
+            public readonly IntPtr Root;
+            public readonly int ProcessId;
+            public readonly long Generation;
+            public Approval(IntPtr root, int pid, long generation) { Root = root; ProcessId = pid; Generation = generation; }
+        }
 
         private struct RequestData
         {
             public PointF Point;
             public IntPtr ExpectedRoot;
-            public long Version, Timestamp;
+            public long Version, Timestamp, ApprovalGeneration;
         }
 
         private struct ElementData
         {
             public int ProcessId, TypeId;
-            public bool Enabled, Offscreen;
+            public bool Enabled, Offscreen, Password;
             public System.Windows.Rect Rectangle;
+        }
+
+        private sealed class ProbeResult
+        {
+            public readonly HoverTarget Target;
+            public readonly string Outcome;
+            public ProbeResult(HoverTarget target, string outcome) { Target = target; Outcome = outcome; }
         }
 
         public HoverProbe(int ownPid)
@@ -100,10 +95,25 @@ namespace SpookyDesktopSpider
             if (ownPid <= 0) throw new ArgumentOutOfRangeException("ownPid");
             ownProcessId = ownPid;
             worker = new Thread(WorkerLoop);
-            worker.Name = "Halloweb read-only hover geometry";
+            worker.Name = "Halloweb approved-window geometry";
             worker.IsBackground = true;
             worker.SetApartmentState(ApartmentState.MTA);
             worker.Start();
+        }
+
+        public bool IsBusy { get { return busy; } }
+        public long CompletedProbes { get { return Interlocked.Read(ref completedProbes); } }
+        public long UiaLookupCount { get { return Interlocked.Read(ref uiaLookups); } }
+        public string LatestOutcome
+        {
+            get
+            {
+                if (disposed) return "DECLINED_STOPPED";
+                HoverTarget target = Interlocked.CompareExchange(ref latest, null, null);
+                if (target != null && !IsFreshTimestamp(target.CapturedAtTimestamp, Stopwatch.GetTimestamp(), MaximumAgeMilliseconds))
+                    return "DECLINED_STALE";
+                return Interlocked.CompareExchange(ref latestOutcome, null, null);
+            }
         }
 
         public HoverTarget Latest
@@ -112,42 +122,91 @@ namespace SpookyDesktopSpider
             {
                 if (disposed) return null;
                 HoverTarget target = Interlocked.CompareExchange(ref latest, null, null);
-                return target != null && IsFreshTimestamp(target.CapturedAtTimestamp,
-                    Stopwatch.GetTimestamp(), MaximumAgeMilliseconds) ? target : null;
+                Approval allowed;
+                lock (requestLock) { allowed = approval; }
+                return target != null && allowed != null && target.ApprovalGeneration == allowed.Generation &&
+                    target.RootWindow == allowed.Root && target.ProcessId == allowed.ProcessId &&
+                    IsFreshTimestamp(target.CapturedAtTimestamp, Stopwatch.GetTimestamp(), MaximumAgeMilliseconds) ? target : null;
             }
         }
 
-        public bool IsBusy { get { return busy; } }
-        public long CompletedProbes { get { return Interlocked.Read(ref completedProbes); } }
-
-        public void Request(PointF point)
+        // The application calls this only after explicit user approval. This
+        // method itself reads window identity/class metadata, never UIA content.
+        public bool ApproveWindow(IntPtr root, int processId)
         {
-            Request(point, IntPtr.Zero);
+            if (disposed) return false;
+            if (!IsEligibleWindow(root, processId, ownProcessId))
+            {
+                RevokeApproval();
+                Interlocked.Exchange(ref latestOutcome, "DECLINED_WINDOW_POLICY");
+                return false;
+            }
+            lock (requestLock)
+            {
+                if (disposed) return false;
+                approval = new Approval(root, processId, ++approvalGeneration);
+                InvalidateLocked("APPROVED_WINDOW");
+                return true;
+            }
         }
 
-        // The caller only replaces a one-slot request. All provider calls and
-        // window selection happen on the existing MTA worker, never the UI thread.
+        public void CancelPending()
+        {
+            lock (requestLock) { if (!disposed) InvalidateLocked("DECLINED_INACTIVE"); }
+        }
+
+        public void RevokeApproval()
+        {
+            lock (requestLock)
+            {
+                approval = null;
+                approvalGeneration++;
+                InvalidateLocked("DECLINED_UNAPPROVED_WINDOW");
+            }
+        }
+
+        public bool IsApprovedWindow(IntPtr root, int processId)
+        {
+            Approval allowed;
+            lock (requestLock) { allowed = approval; }
+            if (disposed || allowed == null || root != allowed.Root) return false;
+            if (processId == allowed.ProcessId && IsEligibleWindow(root, processId, ownProcessId)) return true;
+            lock (requestLock)
+            {
+                if (approval == allowed)
+                {
+                    approval = null;
+                    approvalGeneration++;
+                    InvalidateLocked("DECLINED_WINDOW_CHANGED");
+                }
+            }
+            return false;
+        }
+
+        public void Request(PointF point) { Request(point, IntPtr.Zero); }
         public void Request(PointF point, IntPtr expectedRootWindow)
         {
             if (disposed) return;
             lock (requestLock)
             {
                 if (disposed) return;
-                if (!IsFinitePoint(point))
-                {
-                    // Invalidate the one-slot request as well as its publication.
-                    // An older in-flight result cannot republish after this epoch.
-                    latestRequest = new RequestData { Point = point, Version = ++requestVersion,
-                        Timestamp = Stopwatch.GetTimestamp() };
-                    pending = false;
-                    Interlocked.Exchange(ref latest, null);
-                    return;
-                }
+                if (!IsFinitePoint(point)) { InvalidateLocked("DECLINED_INVALID_POINT"); return; }
+                if (approval == null || (expectedRootWindow != IntPtr.Zero && expectedRootWindow != approval.Root))
+                { InvalidateLocked("DECLINED_UNAPPROVED_WINDOW"); return; }
                 latestRequest = new RequestData { Point = point, ExpectedRoot = expectedRootWindow,
-                    Version = ++requestVersion, Timestamp = Stopwatch.GetTimestamp() };
+                    Version = ++requestVersion, Timestamp = Stopwatch.GetTimestamp(), ApprovalGeneration = approval.Generation };
                 pending = true;
                 SignalRequest();
             }
+        }
+
+        private void InvalidateLocked(string outcome)
+        {
+            latestRequest = new RequestData { Point = new PointF(float.NaN, float.NaN), Version = ++requestVersion,
+                Timestamp = Stopwatch.GetTimestamp(), ApprovalGeneration = approvalGeneration };
+            pending = false;
+            Interlocked.Exchange(ref latest, null);
+            Interlocked.Exchange(ref latestOutcome, outcome);
         }
 
         public void Dispose()
@@ -156,19 +215,18 @@ namespace SpookyDesktopSpider
             {
                 if (disposed) return;
                 disposed = true;
-                pending = false;
-                Interlocked.Exchange(ref latest, null);
+                approval = null;
+                approvalGeneration++;
+                InvalidateLocked("DECLINED_STOPPED");
                 SignalRequest();
             }
-            // A provider may be hung. Do not join, abort, replace the worker, or
-            // dispose its wait handle underneath an in-flight provider call.
-            // The background worker owns that handle and releases it on exit.
+            // Never wait for, abort, or replace a hung provider. One background
+            // MTA worker owns the wait handle and releases it when it exits.
         }
 
         private void SignalRequest()
         {
-            try { requestReady.Set(); }
-            catch (ObjectDisposedException) { /* A worker that already exited needs no signal. */ }
+            try { requestReady.Set(); } catch (ObjectDisposedException) { }
         }
 
         private void WorkerLoop()
@@ -181,12 +239,9 @@ namespace SpookyDesktopSpider
                     requestReady.WaitOne();
                     while (!disposed)
                     {
-                        if (lastStarted != 0)
-                        {
-                            double age = ElapsedMilliseconds(lastStarted, Stopwatch.GetTimestamp());
-                            int delay = (int)Math.Ceiling(MinimumProbeIntervalMilliseconds - age);
-                            if (delay > 0) { requestReady.WaitOne(delay); continue; }
-                        }
+                        int delay = lastStarted == 0 ? 0 : (int)Math.Ceiling(MinimumProbeIntervalMilliseconds -
+                            ElapsedMilliseconds(lastStarted, Stopwatch.GetTimestamp()));
+                        if (delay > 0) { requestReady.WaitOne(delay); continue; }
                         RequestData request;
                         lock (requestLock)
                         {
@@ -195,26 +250,35 @@ namespace SpookyDesktopSpider
                             pending = false;
                         }
                         lastStarted = Stopwatch.GetTimestamp();
-                        HoverTarget target = null;
+                        ProbeResult result;
                         busy = true;
-                        try { target = Probe(request); }
-                        catch (Exception) { target = null; } // Unavailable providers reveal no content or error text.
+                        try { result = Probe(request); }
+                        catch (ElementNotAvailableException) { result = Decline("DECLINED_ELEMENT_UNAVAILABLE"); }
+                        catch (InvalidOperationException) { result = Decline("DECLINED_CACHE_INVALID_OPERATION"); }
+                        catch (COMException) { result = Decline("DECLINED_PROVIDER_COM"); }
+                        catch (NotSupportedException) { result = Decline("DECLINED_PROVIDER_NOT_SUPPORTED"); }
+                        catch (Exception) { result = Decline("DECLINED_UNAVAILABLE"); }
                         finally { busy = false; Interlocked.Increment(ref completedProbes); }
                         if (disposed) break;
                         RequestData current;
-                        lock (requestLock) { current = latestRequest; }
-                        if (target != null && (!IsFreshTimestamp(target.CapturedAtTimestamp,
-                            Stopwatch.GetTimestamp(), MaximumAgeMilliseconds) || !Contains(target.Bounds, current.Point) ||
-                            (current.ExpectedRoot != IntPtr.Zero && current.ExpectedRoot != target.RootWindow) ||
-                            FindExternalRootAtPoint(current.Point, ownProcessId) != target.RootWindow))
-                            target = null;
+                        Approval allowed;
+                        lock (requestLock) { current = latestRequest; allowed = approval; }
+                        if (allowed == null || request.ApprovalGeneration != allowed.Generation || !IsFinitePoint(current.Point))
+                            continue;
+                        HoverTarget target = result.Target;
+                        if (target != null && (!IsFreshTimestamp(target.CapturedAtTimestamp, Stopwatch.GetTimestamp(), MaximumAgeMilliseconds) ||
+                            !Contains(target.Bounds, current.Point) || FindExternalRootAtPoint(current.Point, ownProcessId) != allowed.Root))
+                            result = Decline("DECLINED_STALE_OR_OCCLUDED");
                         lock (requestLock)
                         {
                             if (disposed) break;
-                            if (latestRequest.Version != current.Version) target = null;
-                            Interlocked.Exchange(ref latest, target);
+                            if (latestRequest.Version == current.Version && approval == allowed)
+                            {
+                                Interlocked.Exchange(ref latest, result.Target);
+                                Interlocked.Exchange(ref latestOutcome, result.Outcome);
+                            }
+                            if (!pending) break;
                         }
-                        lock (requestLock) { if (!pending) break; }
                     }
                 }
             }
@@ -225,251 +289,184 @@ namespace SpookyDesktopSpider
             }
         }
 
-        private HoverTarget Probe(RequestData request)
-        {
-            if (!IsFreshTimestamp(request.Timestamp, Stopwatch.GetTimestamp(), MaximumAgeMilliseconds)) return null;
-            IntPtr root = FindExternalRootAtPoint(request.Point, ownProcessId);
-            if (root == IntPtr.Zero || (request.ExpectedRoot != IntPtr.Zero && root != request.ExpectedRoot)) return null;
-            int rootPid = WindowProcessId(root);
-            if (rootPid <= 0 || rootPid == ownProcessId) return null;
-            RectangleF rootBounds;
-            if (!TryWindowBounds(root, out rootBounds) || !Contains(rootBounds, request.Point)) return null;
+        private static ProbeResult Decline(string outcome) { return new ProbeResult(null, outcome); }
 
+        private ProbeResult Probe(RequestData request)
+        {
+            if (!IsFreshTimestamp(request.Timestamp, Stopwatch.GetTimestamp(), MaximumAgeMilliseconds)) return Decline("DECLINED_STALE");
+            Approval allowed;
+            lock (requestLock) { allowed = approval; }
+            if (allowed == null || request.ApprovalGeneration != allowed.Generation) return Decline("DECLINED_UNAPPROVED_WINDOW");
+            IntPtr root = FindExternalRootAtPoint(request.Point, ownProcessId);
+            if (root != allowed.Root || (request.ExpectedRoot != IntPtr.Zero && root != request.ExpectedRoot))
+                return Decline("DECLINED_UNAPPROVED_WINDOW");
+            int pid = WindowProcessId(root);
+            if (!IsApprovedWindow(root, pid)) return Decline("DECLINED_WINDOW_CHANGED");
+            RectangleF rootBounds;
+            if (!TryWindowBounds(root, out rootBounds) || !Contains(rootBounds, request.Point)) return Decline("DECLINED_GEOMETRY");
+            // Approval is checked before the sole UIA lookup. Revocation cannot
+            // cancel an in-flight provider call, but its results are discarded.
+            lock (requestLock) { if (approval != allowed || disposed) return Decline("DECLINED_UNAPPROVED_WINDOW"); }
             CacheRequest cache = GeometryCache();
+            AutomationElement hit;
+            try
             {
-                AutomationElement rootElement, hit = null;
                 using (cache.Activate())
                 {
-                    rootElement = AutomationElement.FromHandle(root);
-                    try { hit = AutomationElement.FromPoint(new System.Windows.Point(request.Point.X, request.Point.Y)); }
-                    catch (ElementNotAvailableException) { hit = null; }
-                    catch (InvalidOperationException) { hit = null; }
-                    catch (COMException) { hit = null; }
+                    Interlocked.Increment(ref uiaLookups);
+                    hit = AutomationElement.FromPoint(new System.Windows.Point(request.Point.X, request.Point.Y));
                 }
-                ElementData rootData;
-                if (rootElement == null || !TryRead(rootElement, out rootData) || rootData.ProcessId != rootPid || rootData.Offscreen)
-                    return null;
-                ElementData hitData = new ElementData();
-                bool unavailable = hit == null || !TryRead(hit, out hitData);
-                bool ownHit = !unavailable && hitData.ProcessId == ownProcessId;
-                HoverTarget target = unavailable || ownHit ? null :
-                    CandidateFromHit(hit, rootElement, request, root, rootPid, rootBounds, cache);
-                if (target == null && (unavailable || ownHit))
-                {
-                    IntPtr nativeHit = DeepestNativeChild(root, request.Point);
-                    AutomationElement fallbackRoot = rootElement;
-                    if (nativeHit != root)
-                    {
-                        using (cache.Activate()) { fallbackRoot = AutomationElement.FromHandle(nativeHit); }
-                        ElementData fallbackData;
-                        if (fallbackRoot == null || !TryRead(fallbackRoot, out fallbackData) || fallbackData.ProcessId == ownProcessId)
-                            return null;
-                    }
-                    target = CandidateFromRoot(fallbackRoot, request, root, rootPid, rootBounds, cache);
-                }
-                // A separate application may have covered or replaced the root
-                // while a provider was answering. Such a result is discarded.
-                if (target != null && (disposed || FindExternalRootAtPoint(request.Point, ownProcessId) != root)) return null;
-                return target;
             }
+            catch (ElementNotAvailableException) { return Decline("DECLINED_POINT_ELEMENT_UNAVAILABLE"); }
+            catch (InvalidOperationException) { return Decline("DECLINED_POINT_INVALID_OPERATION"); }
+            catch (COMException) { return Decline("DECLINED_POINT_PROVIDER_COM"); }
+            catch (NotSupportedException) { return Decline("DECLINED_POINT_NOT_SUPPORTED"); }
+            ElementData data;
+            string metadataDecline;
+            if (hit == null) return Decline("DECLINED_POINT_EMPTY");
+            if (!TryRead(hit, out data, out metadataDecline)) return Decline(metadataDecline);
+            if (data.ProcessId == ownProcessId) return Decline("DECLINED_OWN_OVERLAY");
+            if (data.ProcessId != allowed.ProcessId) return Decline("DECLINED_PROCESS_MISMATCH");
+            if (data.Password) return Decline("DECLINED_SENSITIVE_CONTROL");
+            if (!data.Enabled) return Decline("DECLINED_DISABLED");
+            if (data.Offscreen) return Decline("DECLINED_OFFSCREEN");
+            HoverControlKind kind;
+            if (!TryControlKind(data.TypeId, out kind)) return Decline("DECLINED_UNSUPPORTED");
+            RectangleF bounds;
+            if (!TryTargetBounds(data.Rectangle.X, data.Rectangle.Y, data.Rectangle.Width, data.Rectangle.Height, request.Point, out bounds))
+                return Decline("DECLINED_GEOMETRY");
+            bounds = RectangleF.Intersect(bounds, rootBounds);
+            if (bounds.Width < 1 || bounds.Height < 1 || !Contains(bounds, request.Point)) return Decline("DECLINED_GEOMETRY");
+            if (!IsApprovedWindow(root, WindowProcessId(root)) || FindExternalRootAtPoint(request.Point, ownProcessId) != root)
+                return Decline("DECLINED_STALE_OR_OCCLUDED");
+            return new ProbeResult(new HoverTarget(bounds, request.Point, root, pid, kind, request.Timestamp,
+                request.Version, allowed.Generation), kind == HoverControlKind.Button ? "OBSERVED_BUTTON" : "OBSERVED_MENU_ITEM");
         }
 
         private static CacheRequest GeometryCache()
         {
             CacheRequest request = new CacheRequest();
             request.TreeScope = TreeScope.Element;
-            request.AutomationElementMode = AutomationElementMode.Full;
+            request.AutomationElementMode = AutomationElementMode.None;
             request.Add(AutomationElement.ControlTypeProperty);
             request.Add(AutomationElement.BoundingRectangleProperty);
             request.Add(AutomationElement.IsEnabledProperty);
             request.Add(AutomationElement.IsOffscreenProperty);
+            request.Add(AutomationElement.IsPasswordProperty);
             request.Add(AutomationElement.ProcessIdProperty);
             return request;
         }
 
-        private static bool TryRead(AutomationElement element, out ElementData data)
+        private static bool ReadCached(AutomationElement element, AutomationProperty property, bool ignoreDefault,
+            string field, out object value, out string decline)
+        {
+            value = null; decline = null;
+            try { value = element.GetCachedPropertyValue(property, ignoreDefault); return true; }
+            catch (ElementNotAvailableException) { decline = "DECLINED_METADATA_" + field + "_ELEMENT_UNAVAILABLE"; }
+            catch (InvalidOperationException) { decline = "DECLINED_METADATA_" + field + "_NOT_CACHED"; }
+            catch (COMException) { decline = "DECLINED_METADATA_" + field + "_COM"; }
+            return false;
+        }
+
+        private static bool TryRead(AutomationElement element, out ElementData data, out string decline)
         {
             data = new ElementData();
-            if (element == null) return false;
-            object type = element.GetCachedPropertyValue(AutomationElement.ControlTypeProperty, true);
-            object bounds = element.GetCachedPropertyValue(AutomationElement.BoundingRectangleProperty, true);
-            object enabled = element.GetCachedPropertyValue(AutomationElement.IsEnabledProperty, true);
-            object offscreen = element.GetCachedPropertyValue(AutomationElement.IsOffscreenProperty, true);
-            object process = element.GetCachedPropertyValue(AutomationElement.ProcessIdProperty, true);
+            decline = null;
+            object type, bounds, enabled, offscreen, password, process;
+            if (!ReadCached(element, AutomationElement.ControlTypeProperty, true, "ROLE", out type, out decline)) return false;
             ControlType control = type as ControlType;
-            if (control == null || !(bounds is System.Windows.Rect) || !(enabled is bool) || !(offscreen is bool) || !(process is int)) return false;
-            data.TypeId = control.Id;
-            data.Rectangle = (System.Windows.Rect)bounds;
-            data.Enabled = (bool)enabled;
-            data.Offscreen = (bool)offscreen;
-            data.ProcessId = (int)process;
+            if (control == null) { decline = "DECLINED_METADATA_ROLE_UNAVAILABLE"; return false; }
+            if (!ReadCached(element, AutomationElement.BoundingRectangleProperty, true, "BOUNDS", out bounds, out decline)) return false;
+            if (!(bounds is System.Windows.Rect)) { decline = "DECLINED_METADATA_BOUNDS_UNAVAILABLE"; return false; }
+            if (!ReadCached(element, AutomationElement.IsEnabledProperty, true, "ENABLED", out enabled, out decline)) return false;
+            if (!(enabled is bool)) { decline = "DECLINED_METADATA_ENABLED_UNAVAILABLE"; return false; }
+            if (!ReadCached(element, AutomationElement.IsOffscreenProperty, true, "OFFSCREEN", out offscreen, out decline)) return false;
+            if (!(offscreen is bool)) { decline = "DECLINED_METADATA_OFFSCREEN_UNAVAILABLE"; return false; }
+            // IsPassword is an optional flag on Button/MenuItem. UIA documents
+            // false as its default; accepting that cached default does not read
+            // a value/text field or claim to classify every sensitive window.
+            if (!ReadCached(element, AutomationElement.IsPasswordProperty, false, "PASSWORD", out password, out decline)) return false;
+            if (!(password is bool)) { decline = "DECLINED_METADATA_PASSWORD_UNAVAILABLE"; return false; }
+            if (!ReadCached(element, AutomationElement.ProcessIdProperty, true, "PROCESS", out process, out decline)) return false;
+            if (!(process is int)) { decline = "DECLINED_METADATA_PROCESS_UNAVAILABLE"; return false; }
+            data.TypeId = control.Id; data.Rectangle = (System.Windows.Rect)bounds; data.Enabled = (bool)enabled;
+            data.Offscreen = (bool)offscreen; data.Password = (bool)password; data.ProcessId = (int)process;
             return true;
-        }
-
-        private HoverTarget CandidateFromHit(AutomationElement element, AutomationElement rootElement, RequestData request,
-            IntPtr root, int rootPid, RectangleF rootBounds, CacheRequest cache)
-        {
-            HoverTarget candidate = null;
-            for (int hop = 0; element != null && hop <= MaximumAncestorHops; hop++)
-            {
-                ElementData data;
-                if (!TryRead(element, out data) || data.ProcessId == ownProcessId) return null;
-                // Identity comparison reads no application content. A candidate
-                // must be proven to belong to the selected visible root; process
-                // identity alone cannot distinguish overlapping sibling windows.
-                if (Automation.Compare(element, rootElement)) return candidate;
-                HoverTarget matched = MakeCandidate(data, request, root, rootPid, rootBounds);
-                if (candidate == null && matched != null) candidate = matched;
-                if (hop < MaximumAncestorHops) element = TreeWalker.ControlViewWalker.GetParent(element, cache);
-            }
-            return null;
-        }
-
-        private HoverTarget CandidateFromRoot(AutomationElement rootElement, RequestData request,
-            IntPtr root, int rootPid, RectangleF rootBounds, CacheRequest cache)
-        {
-            // If FromPoint sees our transparent spider/silk/glow instead, query
-            // only the selected external root's bounded control-view subtree.
-            // We never hide overlays, transfer focus, or dispatch pointer input.
-            int visited = 0;
-            long started = Stopwatch.GetTimestamp();
-            HoverTarget best = null;
-            AutomationElement element = rootElement;
-            int depth = 0;
-            while (element != null && depth <= MaximumFallbackDepth && visited < MaximumFallbackNodes && !disposed &&
-                ElapsedMilliseconds(started, Stopwatch.GetTimestamp()) <= FallbackBudgetMilliseconds)
-            {
-                visited++;
-                ElementData data;
-                if (!TryRead(element, out data) || data.ProcessId <= 0 || data.ProcessId == ownProcessId || data.Offscreen || !data.Enabled) return null;
-                System.Windows.Rect rectangle = data.Rectangle;
-                if (rectangle.IsEmpty || !Finite(rectangle.X) || !Finite(rectangle.Y) || !Finite(rectangle.Width) ||
-                    !Finite(rectangle.Height) || rectangle.Width <= 0 || rectangle.Height <= 0 ||
-                    request.Point.X < rectangle.Left || request.Point.X >= rectangle.Right ||
-                    request.Point.Y < rectangle.Top || request.Point.Y >= rectangle.Bottom) return null;
-                HoverTarget candidate = MakeCandidate(data, request, root, rootPid, rootBounds);
-                if (candidate != null && (best == null || candidate.Bounds.Width * candidate.Bounds.Height < best.Bounds.Width * best.Bounds.Height))
-                    best = candidate;
-                if (depth >= MaximumFallbackDepth) return best;
-                AutomationElement containingChild = null;
-                AutomationElement child = TreeWalker.ControlViewWalker.GetFirstChild(element, cache);
-                while (child != null && visited < MaximumFallbackNodes && !disposed &&
-                    ElapsedMilliseconds(started, Stopwatch.GetTimestamp()) <= FallbackBudgetMilliseconds)
-                {
-                    visited++;
-                    ElementData childData;
-                    if (TryRead(child, out childData) && childData.ProcessId > 0 && childData.ProcessId != ownProcessId && !childData.Offscreen &&
-                        !childData.Rectangle.IsEmpty && childData.Rectangle.Contains(new System.Windows.Point(request.Point.X, request.Point.Y)))
-                    {
-                        // UIA logical sibling order is not a visual z-order.
-                        // Ambiguous overlapping branches cannot prove a target.
-                        if (containingChild != null) return null;
-                        containingChild = child;
-                    }
-                    child = TreeWalker.ControlViewWalker.GetNextSibling(child, cache);
-                }
-                if (child != null) return null; // Budget exhaustion cannot prove uniqueness.
-                if (containingChild == null) return best;
-                element = containingChild;
-                depth++;
-            }
-            return null;
-        }
-
-        private HoverTarget MakeCandidate(ElementData data, RequestData request, IntPtr root, int rootPid, RectangleF rootBounds)
-        {
-            HoverControlKind kind;
-            RectangleF bounds;
-            if (!data.Enabled || data.Offscreen || data.ProcessId <= 0 || data.ProcessId == ownProcessId ||
-                !TryControlKind(data.TypeId, out kind) || !TryTargetBounds(data.Rectangle.X, data.Rectangle.Y,
-                    data.Rectangle.Width, data.Rectangle.Height, request.Point, out bounds)) return null;
-            bounds = RectangleF.Intersect(bounds, rootBounds);
-            if (!Contains(bounds, request.Point) || bounds.Width < 1 || bounds.Height < 1) return null;
-            return new HoverTarget(bounds, request.Point, root, rootPid, kind, request.Timestamp, request.Version);
         }
 
         public static bool TryControlKind(int typeId, out HoverControlKind kind)
         {
             kind = HoverControlKind.Button;
             if (typeId == ControlType.Button.Id) return true;
-            if (typeId == ControlType.Hyperlink.Id) { kind = HoverControlKind.Hyperlink; return true; }
-            if (typeId == ControlType.CheckBox.Id) { kind = HoverControlKind.CheckBox; return true; }
-            if (typeId == ControlType.RadioButton.Id) { kind = HoverControlKind.RadioButton; return true; }
-            if (typeId == ControlType.TabItem.Id) { kind = HoverControlKind.TabItem; return true; }
             if (typeId == ControlType.MenuItem.Id) { kind = HoverControlKind.MenuItem; return true; }
             return false;
+        }
+
+        public static bool IsDeniedWindowClass(string className)
+        {
+            if (string.IsNullOrEmpty(className)) return true;
+            string[] denied = { "#32770", "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+                "NotifyIconOverflowWindow", "MultitaskingViewFrame", "DV2ControlHost", "Credential Dialog Xaml Host",
+                "LockScreenBackstopFrame", "LockScreenControllerProxyWindow", "Windows.UI.Core.CoreWindow" };
+            foreach (string name in denied) if (string.Equals(className, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        private static bool IsEligibleWindow(IntPtr root, int pid, int ownPid)
+        {
+            if (root == IntPtr.Zero || pid <= 0 || pid == ownPid || !IsWindow(root) || !IsWindowVisible(root) ||
+                GetAncestor(root, 2) != root || WindowProcessId(root) != pid || IsCloaked(root)) return false;
+            StringBuilder className = new StringBuilder(128);
+            if (GetClassName(root, className, className.Capacity) <= 0) return false;
+            return !IsDeniedWindowClass(className.ToString());
         }
 
         public static bool TryTargetBounds(double x, double y, double width, double height, PointF point, out RectangleF bounds)
         {
             bounds = RectangleF.Empty;
-            if (!IsFinitePoint(point) || !Finite(x) || !Finite(y) || !Finite(width) || !Finite(height) ||
-                width < 1 || height < 1 || width > MaximumTargetWidth || height > MaximumTargetHeight ||
-                width * height > MaximumTargetArea || Math.Abs(x) > MaximumCoordinate || Math.Abs(y) > MaximumCoordinate ||
-                Math.Abs(x + width) > MaximumCoordinate || Math.Abs(y + height) > MaximumCoordinate) return false;
+            if (!IsFinitePoint(point) || !Finite(x) || !Finite(y) || !Finite(width) || !Finite(height) || width < 1 || height < 1 ||
+                width > MaximumTargetWidth || height > MaximumTargetHeight || width * height > MaximumTargetArea ||
+                Math.Abs(x) > MaximumCoordinate || Math.Abs(y) > MaximumCoordinate || Math.Abs(x + width) > MaximumCoordinate ||
+                Math.Abs(y + height) > MaximumCoordinate) return false;
             bounds = new RectangleF((float)x, (float)y, (float)width, (float)height);
             return Contains(bounds, point);
         }
 
         public static bool IsFinitePoint(PointF point) { return Finite(point.X) && Finite(point.Y); }
         private static bool Finite(double value) { return !double.IsNaN(value) && !double.IsInfinity(value); }
-
         public static bool Contains(RectangleF bounds, PointF point)
         {
             return IsFinitePoint(point) && Finite(bounds.Left) && Finite(bounds.Top) && Finite(bounds.Width) && Finite(bounds.Height) &&
-                bounds.Width > 0 && bounds.Height > 0 && point.X >= bounds.Left && point.X < bounds.Right &&
-                point.Y >= bounds.Top && point.Y < bounds.Bottom;
+                bounds.Width > 0 && bounds.Height > 0 && point.X >= bounds.Left && point.X < bounds.Right && point.Y >= bounds.Top && point.Y < bounds.Bottom;
         }
-
-        public static double ElapsedMilliseconds(long start, long end)
-        {
-            return ((double)end - start) * 1000 / Stopwatch.Frequency;
-        }
-
+        public static double ElapsedMilliseconds(long start, long end) { return ((double)end - start) * 1000 / Stopwatch.Frequency; }
         public static bool IsFreshTimestamp(long captured, long now, double maximumAgeMilliseconds)
         {
-            if (captured < 0 || now < captured || !Finite(maximumAgeMilliseconds) || maximumAgeMilliseconds < 0) return false;
-            return ElapsedMilliseconds(captured, now) <= maximumAgeMilliseconds;
+            return captured >= 0 && now >= captured && Finite(maximumAgeMilliseconds) && maximumAgeMilliseconds >= 0 &&
+                ElapsedMilliseconds(captured, now) <= maximumAgeMilliseconds;
         }
 
-        // Read-only z-order geometry avoids considering an occluded control or
-        // treating our own transparent overlay as the application underneath it.
         public static IntPtr FindExternalRootAtPoint(PointF point, int ownPid)
         {
             if (!IsFinitePoint(point) || Math.Abs(point.X) > MaximumCoordinate || Math.Abs(point.Y) > MaximumCoordinate || ownPid <= 0) return IntPtr.Zero;
             IntPtr window = GetTopWindow(IntPtr.Zero);
             for (int checkedWindows = 0; window != IntPtr.Zero && checkedWindows < 512; checkedWindows++)
             {
-                int processId = WindowProcessId(window);
+                int pid = WindowProcessId(window);
                 RectangleF bounds;
-                if (processId > 0 && processId != ownPid && IsWindowVisible(window) &&
-                    TryWindowBounds(window, out bounds) && Contains(bounds, point) && !IsCloaked(window)) return window;
-                window = GetWindow(window, 2); // GW_HWNDNEXT, z-order only.
+                if (pid > 0 && pid != ownPid && IsWindowVisible(window) && TryWindowBounds(window, out bounds) && Contains(bounds, point) && !IsCloaked(window))
+                    return window;
+                window = GetWindow(window, 2);
             }
             return IntPtr.Zero;
         }
 
-        private static IntPtr DeepestNativeChild(IntPtr root, PointF point)
+        public static int WindowProcessId(IntPtr window)
         {
-            IntPtr current = root;
-            for (int hop = 0; hop < MaximumAncestorHops; hop++)
-            {
-                POINT clientPoint = new POINT { X = (int)Math.Round(point.X), Y = (int)Math.Round(point.Y) };
-                if (!ScreenToClient(current, ref clientPoint)) break;
-                IntPtr child = ChildWindowFromPointEx(current, clientPoint, 1); // CWP_SKIPINVISIBLE only.
-                if (child == IntPtr.Zero || child == current || !IsWindowVisible(child)) break;
-                current = child;
-            }
-            return current;
+            uint pid;
+            GetWindowThreadProcessId(window, out pid);
+            return pid <= int.MaxValue ? (int)pid : 0;
         }
-
-        private static int WindowProcessId(IntPtr window)
-        {
-            uint processId;
-            GetWindowThreadProcessId(window, out processId);
-            return processId <= int.MaxValue ? (int)processId : 0;
-        }
-
         private static bool TryWindowBounds(IntPtr window, out RectangleF bounds)
         {
             bounds = RectangleF.Empty;
@@ -480,29 +477,22 @@ namespace SpookyDesktopSpider
             bounds = new RectangleF(rectangle.Left, rectangle.Top, (float)width, (float)height);
             return true;
         }
-
         private static bool IsCloaked(IntPtr window)
         {
-            try
-            {
-                int cloaked;
-                return DwmGetWindowAttribute(window, 14, out cloaked, sizeof(int)) == 0 && cloaked != 0;
-            }
+            try { int cloaked; return DwmGetWindowAttribute(window, 14, out cloaked, sizeof(int)) == 0 && cloaked != 0; }
             catch (DllNotFoundException) { return false; }
             catch (EntryPointNotFoundException) { return false; }
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RECT { public int Left, Top, Right, Bottom; }
-        [StructLayout(LayoutKind.Sequential)]
-        private struct POINT { public int X, Y; }
+        [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
         [DllImport("user32.dll")] private static extern IntPtr GetTopWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
-        [DllImport("user32.dll")] private static extern bool ScreenToClient(IntPtr window, ref POINT point);
-        [DllImport("user32.dll")] private static extern IntPtr ChildWindowFromPointEx(IntPtr parent, POINT point, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
         [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out int value, int size);
     }
 }

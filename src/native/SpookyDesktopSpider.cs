@@ -24,8 +24,14 @@ namespace SpookyDesktopSpider
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }
                 catch (EntryPointNotFoundException) { Native.SetProcessDPIAware(); }
                 if (selfTest) { Checks.Run(); return; }
-                if (Array.IndexOf(args, "--hover-fixture") >= 0) { HoverIntegrationChecks.RunFixture(); return; }
+                int fixtureArgument = Array.IndexOf(args, "--hover-fixture");
+                if (fixtureArgument >= 0)
+                {
+                    if (fixtureArgument + 1 >= args.Length) throw new ArgumentException("Fixture channel required.");
+                    HoverIntegrationChecks.RunFixture(args[fixtureArgument + 1]); return;
+                }
                 if (Array.IndexOf(args, "--hover-smoke-test") >= 0) { HoverIntegrationChecks.Run(); return; }
+                if (Array.IndexOf(args, "--hover-manual-check") >= 0) { HoverIntegrationChecks.RunManual(); return; }
                 if (Array.IndexOf(args, "--quit") >= 0)
                 {
                     IntPtr existing = Native.FindWindow(null, SpiderForm.WindowTitle);
@@ -160,7 +166,9 @@ namespace SpookyDesktopSpider
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToolStripMenuItem pauseItem = new ToolStripMenuItem("Pause spider");
         private readonly ToolStripMenuItem desktopItem = new ToolStripMenuItem("Show only on desktop");
-        private readonly ToolStripMenuItem glowItem = new ToolStripMenuItem("Spider hover glow");
+        private readonly ToolStripMenuItem glowItem = new ToolStripMenuItem("Ghost Pointer curiosity");
+        private readonly ToolStripMenuItem approveItem = new ToolStripMenuItem();
+        private readonly GhostCuriosity curiosity = new GhostCuriosity();
         private readonly List<ToolStripMenuItem> sizes = new List<ToolStripMenuItem>();
         private EcologyMotion motion;
         private WebOverlay webOverlay;
@@ -168,7 +176,7 @@ namespace SpookyDesktopSpider
         private HoverGlow hoverGlow;
         private readonly int ownProcessId = Process.GetCurrentProcess().Id;
         private double scale = 1, lastTime, nextMonitorCheck, forceWeaveUntil;
-        private bool paused, desktopOnly, shown = true, pauseHotkey, quitHotkey;
+        private bool paused, desktopOnly, shown = true, pauseHotkey, quitHotkey, approvalHotkey;
         private int smokePhase;
         private Icon trayIcon;
 
@@ -213,6 +221,7 @@ namespace SpookyDesktopSpider
             Native.ShowWindow(Handle, 4);
             pauseHotkey = Native.RegisterHotKey(Handle, 1, 0x4003, (uint)Keys.S);
             quitHotkey = Native.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.Q);
+            approvalHotkey = Native.RegisterHotKey(Handle, 3, 0x4003, (uint)Keys.G);
             SetupTray();
             webOverlay = new WebOverlay();
             hoverGlow = new HoverGlow();
@@ -262,6 +271,14 @@ namespace SpookyDesktopSpider
             glowItem.Checked = true;
             glowItem.CheckedChanged += delegate { if (!glowItem.Checked) ClearHoverGlow(); };
             menu.Items.Add(glowItem);
+            approveItem.Text = approvalHotkey ? "Approve active window: Ctrl+Alt+G" : "Window approval shortcut unavailable";
+            approveItem.Enabled = false;
+            menu.Items.Add(approveItem);
+            menu.Items.Add("Revoke Ghost Pointer window approval", null, delegate
+            {
+                if (hoverProbe != null) hoverProbe.RevokeApproval();
+                ClearHoverGlow("CONSENT_REVOKED");
+            });
             ToolStripMenuItem sizeMenu = new ToolStripMenuItem("Spider size");
             AddSize(sizeMenu, "Small", 0.75);
             AddSize(sizeMenu, "Original", 1);
@@ -302,7 +319,7 @@ namespace SpookyDesktopSpider
         private void TogglePause()
         {
             paused = !paused;
-            if (paused) ClearHoverGlow();
+            if (paused) ClearHoverGlow("PAUSED");
             pauseItem.Text = paused ? "Resume spider" : "Pause spider";
             tray.Text = paused ? "Halloweb (paused) - right-click for controls" : "Halloweb - right-click for controls";
             RenderSpider();
@@ -316,7 +333,7 @@ namespace SpookyDesktopSpider
             motion.Recall(new PointF(cursor.X + 230, cursor.Y + 100), SafeBounds(screen.WorkingArea));
             forceWeaveUntil = 0;
             if (webOverlay != null) webOverlay.Hide();
-            ClearHoverGlow();
+            ClearHoverGlow("RECALLED");
             RenderSpider();
         }
 
@@ -351,24 +368,29 @@ namespace SpookyDesktopSpider
                 Native.ShowWindow(Handle, shouldShow ? 4 : 0);
                 shown = shouldShow;
                 if (!shown && webOverlay != null) webOverlay.Hide();
-                if (!shown) ClearHoverGlow();
+                if (!shown) ClearHoverGlow("HIDDEN");
                 if (shown) RenderSpider();
             }
             if (shown && !paused)
             {
                 Native.POINT cursor;
-                bool moved = motion.Moving;
+                bool wasHolding = motion.CuriosityHolding;
+                bool moved = motion.Moving && !wasHolding;
                 if (Native.GetCursorPos(out cursor))
                 {
                     double idle = ReadIdleSeconds();
                     if (now < forceWeaveUntil) idle = Math.Max(idle, motion.WeaveThreshold);
-                    motion.Update(new PointF(cursor.X, cursor.Y), elapsed, idle, scale);
+                    PointF pointer = new PointF(cursor.X, cursor.Y);
+                    HoverTarget observed = PrepareCuriosity(elapsed, now, pointer, idle);
+                    motion.Update(pointer, elapsed, idle, scale, null, curiosity.HoldMovement);
+                    if (curiosity.HoldMovement && !motion.CuriosityHolding) ClearHoverGlow("NOT_EXPLORING");
+                    RenderCuriosity(observed);
                 }
-                if (moved || motion.Moving || motion.DistanceMoved > 0) RenderSpider();
+                else ClearHoverGlow();
+                if (moved || (motion.Moving && !motion.CuriosityHolding) || motion.DistanceMoved > 0 || wasHolding != motion.CuriosityHolding) RenderSpider();
             }
             if (webOverlay != null && shown) webOverlay.UpdateWeb(motion.CurrentWeb, scale);
-            UpdateHoverGlow();
-            timer.Interval = shown && !paused && motion.Moving ? 16 : 75;
+            timer.Interval = shown && !paused && motion.Moving && !motion.CuriosityHolding ? 16 : 75;
             if (smokeTest && now > 0.5 && smokePhase == 0)
             {
                 TogglePause();
@@ -393,28 +415,57 @@ namespace SpookyDesktopSpider
         {
             if (!IsHandleCreated) return;
             using (Bitmap bitmap = SpiderArt.Draw(SurfaceSize, motion.Rotation,
-                !paused && motion.Moving, clock.Elapsed.TotalSeconds, scale))
+                !paused && motion.Moving && !motion.CuriosityHolding, clock.Elapsed.TotalSeconds, scale))
             {
                 Native.SetBitmap(Handle, bitmap, (int)Math.Round(motion.Position.X) - SurfaceSize / 2,
                     (int)Math.Round(motion.Position.Y) - SurfaceSize / 2);
             }
         }
 
-        private void ClearHoverGlow()
+        private void ClearHoverGlow(string reason = "DISABLED")
         {
             if (hoverGlow != null) hoverGlow.Clear();
+            if (hoverProbe != null) hoverProbe.CancelPending();
+            curiosity.Reset(reason);
         }
 
-        private void UpdateHoverGlow()
+        private HoverTarget PrepareCuriosity(double elapsed, double now, PointF pointer, double idle)
         {
-            if (hoverProbe == null || hoverGlow == null) return;
-            if (!shown || paused || !glowItem.Checked) { ClearHoverGlow(); return; }
+            if (hoverProbe == null || hoverGlow == null) return null;
             PointF point = motion.Position;
+            bool threat = EcologyMotion.Distance(point, pointer) < 162 * scale || motion.State == "ESCAPE";
+            bool canExplore = shown && !paused && glowItem.Checked && motion.CurrentWeb == null &&
+                idle >= motion.WanderThreshold && idle < motion.WeaveThreshold && motion.State == "WANDER";
             IntPtr root = HoverProbe.FindExternalRootAtPoint(point, ownProcessId);
-            hoverProbe.Request(point, root);
+            if (canExplore && !threat) hoverProbe.Request(point, root);
+            else hoverProbe.CancelPending();
             HoverTarget target = hoverProbe.Latest;
-            if (target == null || !target.IsFresh(point, root, 300)) { ClearHoverGlow(); return; }
-            hoverGlow.UpdateTarget(Rectangle.Round(target.Bounds));
+            if (target != null && (!target.IsFresh(point, root, 300) || !hoverProbe.IsApprovedWindow(root, target.ProcessId))) target = null;
+            curiosity.Update(elapsed, now, point, target == null ? null : new GhostCandidate(target.Bounds, target.Kind), canExplore, threat);
+            return target;
+        }
+
+        private void RenderCuriosity(HoverTarget target)
+        {
+            if (!curiosity.WantsGlow || !motion.CuriosityHolding || target == null ||
+                !target.IsFresh(motion.Position, HoverProbe.FindExternalRootAtPoint(motion.Position, ownProcessId), 300) ||
+                !hoverProbe.IsApprovedWindow(target.RootWindow, target.ProcessId))
+            {
+                hoverGlow.Clear();
+                return;
+            }
+            hoverGlow.UpdateTarget(curiosity.GlowBounds);
+            if (hoverGlow.Visible) curiosity.ConfirmRendered();
+        }
+
+        private void ApproveForegroundWindow()
+        {
+            IntPtr root = Native.GetForegroundWindow();
+            bool approved = hoverProbe != null && hoverProbe.ApproveWindow(root, HoverProbe.WindowProcessId(root));
+            ClearHoverGlow("CONSENT_REVOKED");
+            tray.ShowBalloonTip(4000, "Ghost Pointer",
+                approved ? "Only this selected window is approved for passive Button/MenuItem geometry observation. No input is dispatched." :
+                "That window cannot be approved. Select a non-sensitive ordinary app window and try again.", ToolTipIcon.Info);
         }
 
         private static double ReadIdleSeconds()
@@ -439,7 +490,7 @@ namespace SpookyDesktopSpider
             if (m.Msg == Native.StatusMessage)
             {
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "running-status.txt"),
-                    "Version: Halloweb 0.2.0 (SPIDER-ECOLOGY-11)\r\nRunning: " + Native.IsWindowVisible(Handle) + "\r\nPaused: " + paused +
+                    "Version: Halloweb 0.3.0 (LIVE-SPIDER-12)\r\nRunning: " + Native.IsWindowVisible(Handle) + "\r\nPaused: " + paused +
                     "\r\nState: " + motion.State + "\r\nMotion status: " + motion.MotionStatus +
                     "\r\nDistance moved this tick: " + motion.DistanceMoved.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) +
                     "\r\nRoute status: " + motion.RouteStatus + "\r\nRejected routes remembered: " + motion.RejectedRouteCount +
@@ -451,6 +502,11 @@ namespace SpookyDesktopSpider
                     "\r\nSession ledger entries: " + motion.Ledger.Count +
                     "\r\nHover glow enabled: " + glowItem.Checked +
                     "\r\nHover glow visible: " + (hoverGlow != null && hoverGlow.Visible) +
+                    "\r\nCuriosity state: " + curiosity.State + "\r\nCuriosity holding wander: " + motion.CuriosityHolding +
+                    "\r\nGhost receipt count (RAM only): " + curiosity.Ledger.Count +
+                    "\r\nObservation outcome: " + (hoverProbe == null ? "DISABLED" : hoverProbe.LatestOutcome) +
+                    "\r\nUIA point lookups this session: " + (hoverProbe == null ? 0 : hoverProbe.UiaLookupCount) +
+                    "\r\nApproval shortcut Ctrl+Alt+G: " + approvalHotkey +
                     "\r\nEngine tick: " + motion.Tick + "\r\nPointer polling available: " + PointerPollingAvailable() +
                     "\r\nPause shortcut Ctrl+Alt+S: " + pauseHotkey +
                     "\r\nQuit shortcut Ctrl+Alt+Q: " + quitHotkey + "\r\n");
@@ -460,6 +516,7 @@ namespace SpookyDesktopSpider
             {
                 if (m.WParam.ToInt32() == 1) TogglePause();
                 if (m.WParam.ToInt32() == 2) Close();
+                if (m.WParam.ToInt32() == 3) ApproveForegroundWindow();
                 return;
             }
             if (m.Msg == 0x007E && motion != null) { RefreshBounds(); RenderSpider(); }
@@ -472,6 +529,7 @@ namespace SpookyDesktopSpider
             timer.Dispose();
             Native.UnregisterHotKey(Handle, 1);
             Native.UnregisterHotKey(Handle, 2);
+            Native.UnregisterHotKey(Handle, 3);
             tray.Visible = false;
             if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose();
             tray.Dispose();
@@ -647,7 +705,8 @@ namespace SpookyDesktopSpider
                 "arrival, monitor removal, transparent background, and 432 artwork rotation/size/animation checks.\r\n" +
                 EcologyChecks.Run() + "\r\n" + EcologyV11Checks.Run() + "\r\n" +
                 "PASS: " + HoverGlowChecks.Run() + " hover glow artwork/geometry assertions; " +
-                HoverIntegrationChecks.PureChecks() + " hover target validation/freshness assertions.\r\n");
+                HoverIntegrationChecks.PureChecks() + " hover target validation/freshness assertions.\r\n" +
+                "PASS: " + GhostCuriosityChecks.Run() + " pure curiosity assertions; " + GhostMovementChecks.Run() + " movement priority assertions.\r\n");
             // A deterministic audit example: travel, measured arrival, deferred
             // permission, authorized construction, then revocation by a threat.
             EcologyMotion example = new EcologyMotion(new PointF(140, 100), new RectangleF(20, 20, 1880, 1040), 11);
