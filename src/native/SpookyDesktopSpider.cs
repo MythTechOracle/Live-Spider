@@ -24,6 +24,8 @@ namespace SpookyDesktopSpider
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); }
                 catch (EntryPointNotFoundException) { Native.SetProcessDPIAware(); }
                 if (selfTest) { Checks.Run(); return; }
+                if (Array.IndexOf(args, "--hover-fixture") >= 0) { HoverIntegrationChecks.RunFixture(); return; }
+                if (Array.IndexOf(args, "--hover-smoke-test") >= 0) { HoverIntegrationChecks.Run(); return; }
                 if (Array.IndexOf(args, "--quit") >= 0)
                 {
                     IntPtr existing = Native.FindWindow(null, SpiderForm.WindowTitle);
@@ -158,9 +160,13 @@ namespace SpookyDesktopSpider
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ToolStripMenuItem pauseItem = new ToolStripMenuItem("Pause spider");
         private readonly ToolStripMenuItem desktopItem = new ToolStripMenuItem("Show only on desktop");
+        private readonly ToolStripMenuItem glowItem = new ToolStripMenuItem("Spider hover glow");
         private readonly List<ToolStripMenuItem> sizes = new List<ToolStripMenuItem>();
         private EcologyMotion motion;
         private WebOverlay webOverlay;
+        private HoverProbe hoverProbe;
+        private HoverGlow hoverGlow;
+        private readonly int ownProcessId = Process.GetCurrentProcess().Id;
         private double scale = 1, lastTime, nextMonitorCheck, forceWeaveUntil;
         private bool paused, desktopOnly, shown = true, pauseHotkey, quitHotkey;
         private int smokePhase;
@@ -209,6 +215,10 @@ namespace SpookyDesktopSpider
             quitHotkey = Native.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.Q);
             SetupTray();
             webOverlay = new WebOverlay();
+            hoverGlow = new HoverGlow();
+            // Accessibility providers can block. All provider calls stay on the
+            // probe's single background worker, never on the animation thread.
+            hoverProbe = new HoverProbe(ownProcessId);
             RenderSpider();
             lastTime = clock.Elapsed.TotalSeconds;
             timer.Start();
@@ -248,6 +258,10 @@ namespace SpookyDesktopSpider
             desktopItem.CheckOnClick = true;
             desktopItem.CheckedChanged += delegate { desktopOnly = desktopItem.Checked; };
             menu.Items.Add(desktopItem);
+            glowItem.CheckOnClick = true;
+            glowItem.Checked = true;
+            glowItem.CheckedChanged += delegate { if (!glowItem.Checked) ClearHoverGlow(); };
+            menu.Items.Add(glowItem);
             ToolStripMenuItem sizeMenu = new ToolStripMenuItem("Spider size");
             AddSize(sizeMenu, "Small", 0.75);
             AddSize(sizeMenu, "Original", 1);
@@ -288,6 +302,7 @@ namespace SpookyDesktopSpider
         private void TogglePause()
         {
             paused = !paused;
+            if (paused) ClearHoverGlow();
             pauseItem.Text = paused ? "Resume spider" : "Pause spider";
             tray.Text = paused ? "Halloweb (paused) - right-click for controls" : "Halloweb - right-click for controls";
             RenderSpider();
@@ -301,6 +316,7 @@ namespace SpookyDesktopSpider
             motion.Recall(new PointF(cursor.X + 230, cursor.Y + 100), SafeBounds(screen.WorkingArea));
             forceWeaveUntil = 0;
             if (webOverlay != null) webOverlay.Hide();
+            ClearHoverGlow();
             RenderSpider();
         }
 
@@ -335,6 +351,7 @@ namespace SpookyDesktopSpider
                 Native.ShowWindow(Handle, shouldShow ? 4 : 0);
                 shown = shouldShow;
                 if (!shown && webOverlay != null) webOverlay.Hide();
+                if (!shown) ClearHoverGlow();
                 if (shown) RenderSpider();
             }
             if (shown && !paused)
@@ -350,6 +367,7 @@ namespace SpookyDesktopSpider
                 if (moved || motion.Moving || motion.DistanceMoved > 0) RenderSpider();
             }
             if (webOverlay != null && shown) webOverlay.UpdateWeb(motion.CurrentWeb, scale);
+            UpdateHoverGlow();
             timer.Interval = shown && !paused && motion.Moving ? 16 : 75;
             if (smokeTest && now > 0.5 && smokePhase == 0)
             {
@@ -382,6 +400,23 @@ namespace SpookyDesktopSpider
             }
         }
 
+        private void ClearHoverGlow()
+        {
+            if (hoverGlow != null) hoverGlow.Clear();
+        }
+
+        private void UpdateHoverGlow()
+        {
+            if (hoverProbe == null || hoverGlow == null) return;
+            if (!shown || paused || !glowItem.Checked) { ClearHoverGlow(); return; }
+            PointF point = motion.Position;
+            IntPtr root = HoverProbe.FindExternalRootAtPoint(point, ownProcessId);
+            hoverProbe.Request(point, root);
+            HoverTarget target = hoverProbe.Latest;
+            if (target == null || !target.IsFresh(point, root, 300)) { ClearHoverGlow(); return; }
+            hoverGlow.UpdateTarget(Rectangle.Round(target.Bounds));
+        }
+
         private static double ReadIdleSeconds()
         {
             Native.LASTINPUTINFO input = new Native.LASTINPUTINFO();
@@ -404,7 +439,7 @@ namespace SpookyDesktopSpider
             if (m.Msg == Native.StatusMessage)
             {
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "running-status.txt"),
-                    "Version: Halloweb 0.1.0 (SPIDER-ECOLOGY-11)\r\nRunning: " + Native.IsWindowVisible(Handle) + "\r\nPaused: " + paused +
+                    "Version: Halloweb 0.2.0 (SPIDER-ECOLOGY-11)\r\nRunning: " + Native.IsWindowVisible(Handle) + "\r\nPaused: " + paused +
                     "\r\nState: " + motion.State + "\r\nMotion status: " + motion.MotionStatus +
                     "\r\nDistance moved this tick: " + motion.DistanceMoved.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) +
                     "\r\nRoute status: " + motion.RouteStatus + "\r\nRejected routes remembered: " + motion.RejectedRouteCount +
@@ -414,6 +449,8 @@ namespace SpookyDesktopSpider
                     "\r\nDecision ID: " + (motion.CurrentDecisionId ?? "none") +
                     "\r\nWeaving authorized: " + motion.WeaveAuthorized +
                     "\r\nSession ledger entries: " + motion.Ledger.Count +
+                    "\r\nHover glow enabled: " + glowItem.Checked +
+                    "\r\nHover glow visible: " + (hoverGlow != null && hoverGlow.Visible) +
                     "\r\nEngine tick: " + motion.Tick + "\r\nPointer polling available: " + PointerPollingAvailable() +
                     "\r\nPause shortcut Ctrl+Alt+S: " + pauseHotkey +
                     "\r\nQuit shortcut Ctrl+Alt+Q: " + quitHotkey + "\r\n");
@@ -438,6 +475,8 @@ namespace SpookyDesktopSpider
             tray.Visible = false;
             if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose();
             tray.Dispose();
+            if (hoverProbe != null) hoverProbe.Dispose();
+            if (hoverGlow != null) { hoverGlow.Close(); hoverGlow.Dispose(); }
             if (webOverlay != null) { webOverlay.Close(); webOverlay.Dispose(); }
             if (trayIcon != null) trayIcon.Dispose();
             base.OnFormClosed(e);
@@ -606,7 +645,9 @@ namespace SpookyDesktopSpider
             File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "self-test-results.txt"),
                 "PASS: " + scenarios + " escape scenarios; corners, exact overlap, negative screen coordinates, " +
                 "arrival, monitor removal, transparent background, and 432 artwork rotation/size/animation checks.\r\n" +
-                EcologyChecks.Run() + "\r\n" + EcologyV11Checks.Run() + "\r\n");
+                EcologyChecks.Run() + "\r\n" + EcologyV11Checks.Run() + "\r\n" +
+                "PASS: " + HoverGlowChecks.Run() + " hover glow artwork/geometry assertions; " +
+                HoverIntegrationChecks.PureChecks() + " hover target validation/freshness assertions.\r\n");
             // A deterministic audit example: travel, measured arrival, deferred
             // permission, authorized construction, then revocation by a threat.
             EcologyMotion example = new EcologyMotion(new PointF(140, 100), new RectangleF(20, 20, 1880, 1040), 11);

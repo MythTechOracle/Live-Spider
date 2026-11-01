@@ -66,6 +66,18 @@ Run these commands from the folder containing the executable:
 
 Ledger evidence can include the spider's simulation coordinates, pointer-distance measurements, and current web information. The app reads the global pointer locally and uses Windows' last-input idle information; it does not record the contents of keystrokes. Activity heat and temporary route memory are also session-local.
 
+## Visual hover glow
+
+The glow is a separate small amber overlay around an accessible control under the spider's body. It does not set the app's own hover state. No pointer movement, synthetic input, control invocation, focus request, or hover message is sent to the app underneath.
+
+Supported roles are buttons, hyperlinks, checkboxes, radio buttons, tabs, and menu items. Disabled, offscreen, excessively large, unavailable, or ambiguous targets produce no glow. Desktop files and text fields are excluded. Some applications expose little accessibility geometry, so this effect will not appear on every button.
+
+One background MTA worker reads only control role, bounding rectangle, enabled/offscreen state, and process identity. It reads no names or text and retains no automation element outside that worker. Requests coalesce into one pending point, start at most ten times per second, and expire after 300 milliseconds. Provider calls cannot delay the spider's animation thread. A hung provider occupies that one background worker; the app does not create replacement threads to chase it.
+
+The detector excludes Halloweb's own windows and rechecks the visible external window beneath the spider before displaying a result. A bounded fallback handles its transparent overlays without hiding them or moving the pointer. Geometry and window identity checks are conservative; they do not reproduce every application's private hit-testing rules. Missing or uncertain geometry means no glow.
+
+The tray's **Spider hover glow** option is enabled at launch. Switching it off, pausing, hiding the spider, recalling it, or closing the app clears the glow. All three visual overlays use layered, click-through, nonactivating windows.
+
 ## JavaScript reference engine
 
 The source under `src/behavior/` is a separately tested JavaScript behavior engine. It retains complete two-leg geometric detours, revalidates the remaining clamped route, and stops an invalidated plan before stale movement can occur. Its detour tests do not establish a native Windows detour feature.
@@ -88,6 +100,7 @@ The recorded verification on **31 October 2026** distinguishes behavior tests fr
 | Native v11 behavior checks | **749 assertions passed**. |
 | Existing desktop self-tests | Retain 135 escape scenarios, 432 artwork rotation/size/animation checks, and progressive silk checks. |
 | Real Windows smoke checks | Exercise both layered overlays, click-through and no-activation styles, retained keyboard focus, screen placement, pause/resume, and ledger JSON serialization. |
+| Hover glow checks (1 November 2026) | **40** pure rendering/geometry assertions and **27** target validation/freshness assertions passed. **19** separate real Windows fixture checks verified detection through both overlays, disabled/text/covered/closed controls, no input events during probing, and unchanged pointer/focus. |
 
 These are different groups and units of verification, not a single combined test-case count. The two original JavaScript test files were preserved without weakening their assertions.
 
@@ -96,3 +109,5 @@ Fresh cases cover central denial across first-web, resumed-web, waiting, recover
 The Windows runtime checks are separate from Node.js success. An initial tool-sandbox launch could not poll the global pointer; repeating the same verified executable outside that sandbox confirmed live pointer polling and engine receipts. That result describes the execution context of those checks, not a claim of broad testing across every Windows installation. No Electron runtime is used or verified by the native build.
 
 From a Windows checkout, run `./scripts/verify.ps1` for the packaged checks. The native executable also supports `--self-test` and a temporary `--smoke-test` launch.
+
+`./scripts/verify.ps1 -Smoke` additionally launches an isolated hover fixture. It checks actual detection beneath the spider and glow, physical alignment, text/disabled/covered targets, clear behavior, and the absence of fixture mouse-enter, hover, click, focus, and activation events. It also verifies that the real pointer and foreground window remain unchanged. Its controls belong to a separate test process; it does not interact with buttons in the user's apps. The fixture closes automatically. Keep the pointer still during this opt-in check.

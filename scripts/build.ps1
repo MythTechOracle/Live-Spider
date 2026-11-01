@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
 }
 
 $manifestPath = Join-Path $nativeRoot 'spider.manifest'
-$sourceNames = @('AssemblyInfo.cs', 'SpookyDesktopSpider.cs', 'EcologyMotion.cs', 'EcologyChecks.cs', 'EcologyV11Checks.cs', 'WebOverlay.cs')
+$sourceNames = @('AssemblyInfo.cs', 'SpookyDesktopSpider.cs', 'EcologyMotion.cs', 'EcologyChecks.cs', 'EcologyV11Checks.cs', 'WebOverlay.cs', 'HoverProbe.cs', 'HoverGlow.cs', 'HoverGlowChecks.cs', 'HoverIntegrationChecks.cs')
 $sourcePaths = @($sourceNames | ForEach-Object { Join-Path $nativeRoot $_ })
 foreach ($requiredPath in @($manifestPath) + $sourcePaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
@@ -33,7 +33,10 @@ $compilerArguments = @(
     ('/out:' + $outputPath), ('/win32manifest:' + $manifestPath),
     '/reference:System.dll', '/reference:System.Core.dll',
     '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll',
-    '/reference:System.Web.Extensions.dll'
+    '/reference:System.Web.Extensions.dll',
+    ('/reference:' + (Join-Path (Split-Path -Parent $compilerPath) 'WPF\UIAutomationClient.dll')),
+    ('/reference:' + (Join-Path (Split-Path -Parent $compilerPath) 'WPF\UIAutomationTypes.dll')),
+    ('/reference:' + (Join-Path (Split-Path -Parent $compilerPath) 'WPF\WindowsBase.dll'))
 ) + $sourcePaths
 
 & $compilerPath @compilerArguments

@@ -8,6 +8,8 @@ Halloweb is a tiny Windows desktop spider with somewhere to be. Move your pointe
 
 The spider and its silk float over ordinary desktop windows. Their transparent overlays let your clicks reach the apps underneath.
 
+When it crosses an accessible button, a soft amber **hover glow** outlines the control beneath its body. This is Halloweb's own visual effect: it does not move your pointer or send hover, click, or activation events to the app. Controls that do not expose suitable accessibility geometry simply receive no glow.
+
 ## Meet your spider
 
 - After **2 minutes idle**, it starts wandering.
@@ -23,6 +25,8 @@ Halloweb targets **Windows 10 or 11, x64** and uses the .NET Framework included 
 
 Download the Windows ZIP from [Releases](https://github.com/MythTechOracle/Live-Spider/releases), extract it, and double-click **Halloweb.exe**.
 
+The hover glow is part of the **0.2.0 source build**. The published v0.1.0 ZIP does not include it yet.
+
 Right-click the spider icon in the system tray; it may be inside the tray's up-arrow menu.
 
 | Control | What it does |
@@ -31,6 +35,7 @@ Right-click the spider icon in the system tray; it may be inside the tray's up-a
 | **Pause / Resume** | Stops or resumes the spider and its construction. Double-clicking the tray icon also toggles pause. |
 | **Bring spider near pointer** | Recalls it to your current display and clears its previous web. |
 | **Show only on desktop** | Hides the overlays while another app has focus. |
+| **Spider hover glow** | Toggles the visual button outline. Enabled at launch; pausing also hides it. |
 | **Spider size** | Chooses Small, Original, or Large. |
 | **Clear web and route memory** | Gives the spider a fresh start. |
 | **Exit spider** | Closes the app. **Ctrl+Alt+Q** also quits when that shortcut is available. |
@@ -58,6 +63,8 @@ Verification also needs Node.js for the independent JavaScript behavior tests. N
 ## Local by design
 
 Halloweb reads the pointer position locally so the spider can react. It uses Windows' idle-time information without recording keystrokes. Its activity map, web progress, route memory, and recent behavior history stay in memory for the current session. An explicit diagnostic command can export a local history snapshot.
+
+Hover glow uses read-only Windows accessibility queries for control roles, bounds, availability, and process identity. It does not read control names or text, invoke controls, or save a history of the apps beneath the spider.
 
 See [Behavior and verification](docs/BEHAVIOR.md) for the movement rules, diagnostic commands, test evidence, and the differences between the Windows app and the JavaScript experiments.
 
