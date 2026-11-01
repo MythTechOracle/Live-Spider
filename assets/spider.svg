@@ -1,0 +1,47 @@
+<svg viewBox="0 0 100 100" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <filter id="drop-shadow" x="-30%" y="-30%" width="160%" height="160%">
+                    <feDropShadow dx="0" dy="6" stdDeviation="4" flood-color="#000" flood-opacity="0.9"/>
+                </filter>
+
+                <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" stop-color="#2a2a2a" />
+                    <stop offset="100%" stop-color="#050505" />
+                </linearGradient>
+            </defs>
+
+            <g filter="url(#drop-shadow)">
+                <!-- Left Legs -->
+                <path d="M45 40 Q 10 10, 5 35" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+                <path d="M45 45 Q 5 40, 5 55" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+                <path d="M45 50 Q 5 70, 15 85" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+                <path d="M48 55 Q 30 95, 25 105" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+
+                <!-- Right Legs -->
+                <path d="M55 40 Q 90 10, 95 35" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+                <path d="M55 45 Q 95 40, 95 55" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+                <path d="M55 50 Q 95 70, 85 85" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+                <path d="M52 55 Q 70 95, 75 105" stroke="#111" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+
+                <!-- Pedipalps (front feelers) -->
+                <path d="M45 32 Q 40 20, 38 18" stroke="#111" stroke-width="3" fill="none" stroke-linecap="round"/>
+                <path d="M55 32 Q 60 20, 62 18" stroke="#111" stroke-width="3" fill="none" stroke-linecap="round"/>
+
+                <!-- Abdomen (Bottom big part) -->
+                <ellipse cx="50" cy="65" rx="14" ry="22" fill="url(#bodyGrad)" stroke="#000" stroke-width="1.5"/>
+
+                <!-- Red Hourglass mark for extra spookiness -->
+                <path d="M47 55 L53 55 L48 62 L52 62 Z" fill="#ff1a1a"/>
+
+                <!-- Cephalothorax (Head/Chest) -->
+                <circle cx="50" cy="40" r="10" fill="#151515" stroke="#000" stroke-width="1"/>
+
+                <!-- Glowing Eyes -->
+                <circle cx="46" cy="36" r="1.5" fill="#ff0000"/>
+                <circle cx="54" cy="36" r="1.5" fill="#ff0000"/>
+                <circle cx="42" cy="38" r="1" fill="#ff4d4d"/>
+                <circle cx="58" cy="38" r="1" fill="#ff4d4d"/>
+                <circle cx="48" cy="34" r="0.8" fill="#ff0000"/>
+                <circle cx="52" cy="34" r="0.8" fill="#ff0000"/>
+            </g>
+        </svg>

@@ -1,0 +1,30 @@
+# Built applications and local verification output
+dist/
+build/
+*.exe
+*.dll
+*.pdb
+*.zip
+node_modules/
+
+# Local app snapshots and diagnostics
+running-status.txt
+session-ledger.json
+smoke-ledger.json
+native-receipt-example.json
+spider-error.txt
+self-test-results.txt
+smoke-test-results.txt
+spider-preview.png
+web-preview.png
+ecology-preview.png
+
+# Editor and operating-system files
+.vs/
+.vscode/
+*.user
+Thumbs.db
+Desktop.ini
+.DS_Store
+.env
+.env.*

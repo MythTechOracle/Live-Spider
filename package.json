@@ -1,0 +1,12 @@
+{
+  "name": "halloweb",
+  "version": "0.1.0",
+  "description": "A little Halloween spirit for your Windows desktop.",
+  "private": true,
+  "license": "MIT",
+  "repository": "https://github.com/MythTechOracle/Live-Spider",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/behavior/*.test.js"
+  }
+}
