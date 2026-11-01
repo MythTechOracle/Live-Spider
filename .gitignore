@@ -15,6 +15,9 @@ native-receipt-example.json
 spider-error.txt
 self-test-results.txt
 smoke-test-results.txt
+hover-smoke-test-results.txt
+hover-fixture-state.json
+hover-fixture-command.txt
 spider-preview.png
 web-preview.png
 ecology-preview.png

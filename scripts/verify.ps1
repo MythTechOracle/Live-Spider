@@ -82,6 +82,7 @@ function Invoke-HallowebNativeCheck {
 Invoke-HallowebNativeCheck -Name 'native' -Argument '--self-test' -ExpectedReport 'self-test-results.txt'
 if ($Smoke) {
     Invoke-HallowebNativeCheck -Name 'smoke' -Argument '--smoke-test' -ExpectedReport 'smoke-test-results.txt'
+    Invoke-HallowebNativeCheck -Name 'hover' -Argument '--hover-smoke-test' -ExpectedReport 'hover-smoke-test-results.txt'
 } else {
     Write-Output 'Desktop smoke test was not requested. Run with -Smoke only from an interactive Windows desktop.'
 }
