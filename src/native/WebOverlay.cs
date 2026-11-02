@@ -12,7 +12,7 @@ namespace SpookyDesktopSpider
     {
         private const int Surface = 192;
         private PointF lastAnchor;
-        private double lastProgress = -1, lastScale;
+        private double lastProgress = -1, lastScale, lastBounce;
 
         public WebOverlay()
         {
@@ -36,18 +36,22 @@ namespace SpookyDesktopSpider
             }
         }
 
-        public void UpdateWeb(EcologyWeb web, double scale)
+        public void UpdateWeb(EcologyWeb web, double scale, double bounceOffset = 0)
         {
             if (web == null || web.Progress <= 0) { if (Visible) Hide(); return; }
-            if (Math.Abs(lastProgress - web.Progress) < 0.035 && lastAnchor == web.Anchor && lastScale == scale && Visible) return;
+            if (double.IsNaN(bounceOffset) || double.IsInfinity(bounceOffset)) bounceOffset = 0;
+            bounceOffset = Math.Max(-8 * scale, Math.Min(8 * scale, bounceOffset));
+            if (Math.Abs(lastProgress - web.Progress) < 0.035 && lastAnchor == web.Anchor && lastScale == scale &&
+                Math.Abs(lastBounce - bounceOffset) < 0.05 && Visible) return;
             lastAnchor = web.Anchor;
             lastProgress = web.Progress;
             lastScale = scale;
+            lastBounce = bounceOffset;
             // Construct the HWND without activation; UpdateLayeredWindow supplies per-pixel alpha.
             IntPtr nativeHandle = Handle;
             using (Bitmap bitmap = WebArt.Draw(Surface, web.Progress, scale))
                 Native.SetBitmap(nativeHandle, bitmap, (int)Math.Round(web.Anchor.X) - Surface / 2,
-                    (int)Math.Round(web.Anchor.Y) - Surface / 2);
+                    (int)Math.Round(web.Anchor.Y + bounceOffset) - Surface / 2);
             if (!Visible) Show();
             Native.ShowWindow(nativeHandle, 4);
         }
