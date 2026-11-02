@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath $compilerPath -PathType Leaf)) {
 }
 
 $manifestPath = Join-Path $nativeRoot 'spider.manifest'
-$sourceNames = @('AssemblyInfo.cs', 'SpookyDesktopSpider.cs', 'EcologyMotion.cs', 'EcologyChecks.cs', 'EcologyV11Checks.cs', 'WebOverlay.cs', 'HoverProbe.cs', 'HoverGlow.cs', 'HoverGlowChecks.cs', 'HoverIntegrationChecks.cs', 'GhostCuriosity.cs', 'GhostCuriosityChecks.cs', 'GhostMovementChecks.cs')
+$sourceNames = @('AssemblyInfo.cs', 'SpookyDesktopSpider.cs', 'EcologyMotion.cs', 'EcologyChecks.cs', 'EcologyV11Checks.cs', 'WebOverlay.cs', 'HoverProbe.cs', 'HoverGlow.cs', 'HoverGlowChecks.cs', 'HoverIntegrationChecks.cs', 'GhostCuriosity.cs', 'GhostCuriosityChecks.cs', 'GhostMovementChecks.cs', 'HangingMotion.cs', 'HangingChecks.cs', 'HangingAcceptanceChecks.cs', 'TetherOverlay.cs', 'TetherArtChecks.cs', 'HangingVisualChecks.cs', 'SuspensionLifecycle.cs')
 $sourcePaths = @($sourceNames | ForEach-Object { Join-Path $nativeRoot $_ })
 foreach ($requiredPath in @($manifestPath) + $sourcePaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {

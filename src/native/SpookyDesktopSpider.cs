@@ -32,6 +32,8 @@ namespace SpookyDesktopSpider
                 }
                 if (Array.IndexOf(args, "--hover-smoke-test") >= 0) { HoverIntegrationChecks.Run(); return; }
                 if (Array.IndexOf(args, "--hover-manual-check") >= 0) { HoverIntegrationChecks.RunManual(); return; }
+                if (Array.IndexOf(args, "--hanging-smoke-test") >= 0) { HangingVisualChecks.Run(true); return; }
+                if (Array.IndexOf(args, "--hanging-demo") >= 0) { HangingVisualChecks.Run(false); return; }
                 if (Array.IndexOf(args, "--quit") >= 0)
                 {
                     IntPtr existing = Native.FindWindow(null, SpiderForm.WindowTitle);
@@ -168,15 +170,19 @@ namespace SpookyDesktopSpider
         private readonly ToolStripMenuItem desktopItem = new ToolStripMenuItem("Show only on desktop");
         private readonly ToolStripMenuItem glowItem = new ToolStripMenuItem("Ghost Pointer curiosity");
         private readonly ToolStripMenuItem approveItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem hangingItem = new ToolStripMenuItem("Idle hanging from web");
         private readonly GhostCuriosity curiosity = new GhostCuriosity();
         private readonly List<ToolStripMenuItem> sizes = new List<ToolStripMenuItem>();
         private EcologyMotion motion;
         private WebOverlay webOverlay;
+        private TetherOverlay tetherOverlay;
         private HoverProbe hoverProbe;
         private HoverGlow hoverGlow;
         private readonly int ownProcessId = Process.GetCurrentProcess().Id;
         private double scale = 1, lastTime, nextMonitorCheck, forceWeaveUntil;
         private bool paused, desktopOnly, shown = true, pauseHotkey, quitHotkey, approvalHotkey;
+        private bool sessionNotifications;
+        private readonly SuspensionSessionGate sessionGate = new SuspensionSessionGate();
         private int smokePhase;
         private Icon trayIcon;
 
@@ -222,8 +228,10 @@ namespace SpookyDesktopSpider
             pauseHotkey = Native.RegisterHotKey(Handle, 1, 0x4003, (uint)Keys.S);
             quitHotkey = Native.RegisterHotKey(Handle, 2, 0x4003, (uint)Keys.Q);
             approvalHotkey = Native.RegisterHotKey(Handle, 3, 0x4003, (uint)Keys.G);
+            sessionNotifications = Native.WTSRegisterSessionNotification(Handle, 0);
             SetupTray();
             webOverlay = new WebOverlay();
+            tetherOverlay = new TetherOverlay();
             hoverGlow = new HoverGlow();
             // Accessibility providers can block. All provider calls stay on the
             // probe's single background worker, never on the animation thread.
@@ -260,6 +268,7 @@ namespace SpookyDesktopSpider
             menu.Items.Add("Build a web now", null, delegate { forceWeaveUntil = clock.Elapsed.TotalSeconds + 90; });
             menu.Items.Add("Clear web and route memory", null, delegate
             {
+                CancelSuspension("WEB_CLEARED");
                 motion.ClearWeb();
                 forceWeaveUntil = 0;
                 if (webOverlay != null) webOverlay.Hide();
@@ -279,6 +288,29 @@ namespace SpookyDesktopSpider
                 if (hoverProbe != null) hoverProbe.RevokeApproval();
                 ClearHoverGlow("CONSENT_REVOKED");
             });
+            hangingItem.CheckOnClick = true;
+            hangingItem.Enabled = sessionNotifications;
+            hangingItem.CheckedChanged += delegate
+            {
+                motion.HangingEnabled = hangingItem.Checked && sessionNotifications;
+                if (!motion.HangingEnabled) CancelSuspension("DISABLED");
+            };
+            menu.Items.Add(hangingItem);
+            ToolStripMenuItem depthMenu = new ToolStripMenuItem("Hanging depth");
+            foreach (int depth in new int[] { 80, 160, 240 })
+            {
+                int selectedDepth = depth;
+                ToolStripMenuItem item = new ToolStripMenuItem(depth == 80 ? "Short" : depth == 160 ? "Medium" : "Long") { Checked = depth == 160 };
+                item.Click += delegate
+                {
+                    CancelSuspension("DEPTH_CHANGED");
+                    motion.HangingDepth = selectedDepth;
+                    foreach (ToolStripMenuItem other in depthMenu.DropDownItems) other.Checked = other == item;
+                };
+                depthMenu.DropDownItems.Add(item);
+            }
+            menu.Items.Add(depthMenu);
+            menu.Items.Add("Preview hanging in test window", null, delegate { HangingVisualChecks.ShowDemo(); });
             ToolStripMenuItem sizeMenu = new ToolStripMenuItem("Spider size");
             AddSize(sizeMenu, "Small", 0.75);
             AddSize(sizeMenu, "Original", 1);
@@ -308,6 +340,7 @@ namespace SpookyDesktopSpider
             item.Click += delegate
             {
                 scale = value;
+                CancelSuspension("SIZE_CHANGED");
                 foreach (ToolStripMenuItem other in sizes) other.Checked = other == item;
                 RefreshBounds();
                 RenderSpider();
@@ -319,6 +352,7 @@ namespace SpookyDesktopSpider
         private void TogglePause()
         {
             paused = !paused;
+            if (paused) CancelSuspension("PAUSED");
             if (paused) ClearHoverGlow("PAUSED");
             pauseItem.Text = paused ? "Resume spider" : "Pause spider";
             tray.Text = paused ? "Halloweb (paused) - right-click for controls" : "Halloweb - right-click for controls";
@@ -329,6 +363,7 @@ namespace SpookyDesktopSpider
         {
             Native.POINT cursor;
             if (!Native.GetCursorPos(out cursor)) return;
+            CancelSuspension("RECALLED");
             Screen screen = Screen.FromPoint(new Point(cursor.X, cursor.Y));
             motion.Recall(new PointF(cursor.X + 230, cursor.Y + 100), SafeBounds(screen.WorkingArea));
             forceWeaveUntil = 0;
@@ -342,7 +377,10 @@ namespace SpookyDesktopSpider
             // Stay on a real display, including when a monitor is unplugged.
             PointF previous = motion.Position;
             Screen screen = Screen.FromPoint(Point.Round(motion.Position));
-            motion.SetBounds(SafeBounds(screen.WorkingArea));
+            RectangleF bounds = SafeBounds(screen.WorkingArea);
+            if (bounds == motion.Bounds) return;
+            CancelSuspension("DISPLAY_CHANGED");
+            motion.SetBounds(bounds);
             if (previous != motion.Position) RenderSpider();
         }
 
@@ -362,13 +400,14 @@ namespace SpookyDesktopSpider
             double elapsed = now - lastTime;
             lastTime = now;
             if (now > nextMonitorCheck) { RefreshBounds(); nextMonitorCheck = now + 1; }
-            bool shouldShow = !desktopOnly || DesktopHasFocus();
+            bool shouldShow = sessionGate.CanAnimate && (!desktopOnly || DesktopHasFocus());
             if (shouldShow != shown)
             {
                 Native.ShowWindow(Handle, shouldShow ? 4 : 0);
                 shown = shouldShow;
                 if (!shown && webOverlay != null) webOverlay.Hide();
                 if (!shown) ClearHoverGlow("HIDDEN");
+                if (!shown) CancelSuspension("HIDDEN");
                 if (shown) RenderSpider();
             }
             if (shown && !paused)
@@ -386,11 +425,20 @@ namespace SpookyDesktopSpider
                     if (curiosity.HoldMovement && !motion.CuriosityHolding) ClearHoverGlow("NOT_EXPLORING");
                     RenderCuriosity(observed);
                 }
-                else ClearHoverGlow();
-                if (moved || (motion.Moving && !motion.CuriosityHolding) || motion.DistanceMoved > 0 || wasHolding != motion.CuriosityHolding) RenderSpider();
+                else { ClearHoverGlow(); CancelSuspension("POINTER_UNAVAILABLE"); }
+                if (moved || (motion.Moving && !motion.CuriosityHolding) || motion.DistanceMoved > 0 || wasHolding != motion.CuriosityHolding || motion.SuspensionActive) RenderSpider();
             }
-            if (webOverlay != null && shown) webOverlay.UpdateWeb(motion.CurrentWeb, scale);
-            timer.Interval = shown && !paused && motion.Moving && !motion.CuriosityHolding ? 16 : 75;
+            if (webOverlay != null && shown)
+            {
+                webOverlay.UpdateWeb(motion.CurrentWeb, scale, motion.WebBounceOffset);
+                if (webOverlay.Visible && motion.WebImpactPending && Math.Abs(motion.WebBounceOffset) > 0.1) motion.ConfirmWebImpactRendered();
+            }
+            if (tetherOverlay != null) tetherOverlay.UpdateTether(motion.TetherAnchor, motion.Position, scale,
+                shown && !paused && sessionGate.CanAnimate && motion.TetherVisible);
+            if (tetherOverlay != null && tetherOverlay.Visible)
+                Native.SetWindowPos(tetherOverlay.Handle, Handle, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+            timer.Interval = shown && !paused && motion.SuspensionActive ? 25 :
+                shown && !paused && motion.Moving && !motion.CuriosityHolding ? 16 : 75;
             if (smokeTest && now > 0.5 && smokePhase == 0)
             {
                 TogglePause();
@@ -415,7 +463,8 @@ namespace SpookyDesktopSpider
         {
             if (!IsHandleCreated) return;
             using (Bitmap bitmap = SpiderArt.Draw(SurfaceSize, motion.Rotation,
-                !paused && motion.Moving && !motion.CuriosityHolding, clock.Elapsed.TotalSeconds, scale))
+                !paused && motion.Moving && !motion.CuriosityHolding, clock.Elapsed.TotalSeconds, scale,
+                !paused && motion.HangingAnimation))
             {
                 Native.SetBitmap(Handle, bitmap, (int)Math.Round(motion.Position.X) - SurfaceSize / 2,
                     (int)Math.Round(motion.Position.Y) - SurfaceSize / 2);
@@ -427,6 +476,12 @@ namespace SpookyDesktopSpider
             if (hoverGlow != null) hoverGlow.Clear();
             if (hoverProbe != null) hoverProbe.CancelPending();
             curiosity.Reset(reason);
+        }
+
+        private void CancelSuspension(string reason)
+        {
+            motion.CancelHanging(reason);
+            if (tetherOverlay != null) tetherOverlay.Clear();
         }
 
         private HoverTarget PrepareCuriosity(double elapsed, double now, PointF pointer, double idle)
@@ -490,7 +545,7 @@ namespace SpookyDesktopSpider
             if (m.Msg == Native.StatusMessage)
             {
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "running-status.txt"),
-                    "Version: Halloweb 0.3.0 (LIVE-SPIDER-12)\r\nRunning: " + Native.IsWindowVisible(Handle) + "\r\nPaused: " + paused +
+                    "Version: Halloweb 0.4.0 (LIVE-SPIDER-14)\r\nRunning: " + Native.IsWindowVisible(Handle) + "\r\nPaused: " + paused +
                     "\r\nState: " + motion.State + "\r\nMotion status: " + motion.MotionStatus +
                     "\r\nDistance moved this tick: " + motion.DistanceMoved.ToString("F3", System.Globalization.CultureInfo.InvariantCulture) +
                     "\r\nRoute status: " + motion.RouteStatus + "\r\nRejected routes remembered: " + motion.RejectedRouteCount +
@@ -504,6 +559,9 @@ namespace SpookyDesktopSpider
                     "\r\nHover glow visible: " + (hoverGlow != null && hoverGlow.Visible) +
                     "\r\nCuriosity state: " + curiosity.State + "\r\nCuriosity holding wander: " + motion.CuriosityHolding +
                     "\r\nGhost receipt count (RAM only): " + curiosity.Ledger.Count +
+                    "\r\nIdle hanging enabled: " + motion.HangingEnabled + "\r\nSuspension state: " + motion.SuspensionState +
+                    "\r\nTether visible: " + (tetherOverlay != null && tetherOverlay.Visible) +
+                    "\r\nSession lifecycle notifications: " + sessionNotifications +
                     "\r\nObservation outcome: " + (hoverProbe == null ? "DISABLED" : hoverProbe.LatestOutcome) +
                     "\r\nUIA point lookups this session: " + (hoverProbe == null ? 0 : hoverProbe.UiaLookupCount) +
                     "\r\nApproval shortcut Ctrl+Alt+G: " + approvalHotkey +
@@ -519,8 +577,26 @@ namespace SpookyDesktopSpider
                 if (m.WParam.ToInt32() == 3) ApproveForegroundWindow();
                 return;
             }
-            if (m.Msg == 0x007E && motion != null) { RefreshBounds(); RenderSpider(); }
+            if (m.Msg == 0x02B1)
+            {
+                int change = m.WParam.ToInt32();
+                if (sessionGate.ApplyChange(change))
+                {
+                    CancelSuspension("SESSION_LOCK"); ClearHoverGlow("HIDDEN");
+                    Native.ShowWindow(Handle, 0); shown = false;
+                    if (webOverlay != null) webOverlay.Hide();
+                }
+                if (change == 8 || change == 1 || change == 3) lastTime = clock.Elapsed.TotalSeconds;
+            }
+            if ((m.Msg == 0x007E || m.Msg == 0x02E0 || m.Msg == 0x001A) && motion != null)
+            { CancelSuspension("DISPLAY_CHANGED"); RefreshBounds(); RenderSpider(); }
             base.WndProc(ref m);
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            CancelSuspension("SHUTDOWN"); ClearHoverGlow("SHUTDOWN");
+            base.OnFormClosing(e);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -530,12 +606,14 @@ namespace SpookyDesktopSpider
             Native.UnregisterHotKey(Handle, 1);
             Native.UnregisterHotKey(Handle, 2);
             Native.UnregisterHotKey(Handle, 3);
+            if (sessionNotifications) Native.WTSUnRegisterSessionNotification(Handle);
             tray.Visible = false;
             if (tray.ContextMenuStrip != null) tray.ContextMenuStrip.Dispose();
             tray.Dispose();
             if (hoverProbe != null) hoverProbe.Dispose();
             if (hoverGlow != null) { hoverGlow.Close(); hoverGlow.Dispose(); }
             if (webOverlay != null) { webOverlay.Close(); webOverlay.Dispose(); }
+            if (tetherOverlay != null) tetherOverlay.Dispose();
             if (trayIcon != null) trayIcon.Dispose();
             base.OnFormClosed(e);
         }
@@ -565,7 +643,7 @@ namespace SpookyDesktopSpider
             }
         }
 
-        public static Bitmap Draw(int size, double angle, bool moving, double time, double scale)
+        public static Bitmap Draw(int size, double angle, bool moving, double time, double scale, bool hanging = false)
         {
             Bitmap bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bitmap))
@@ -573,8 +651,8 @@ namespace SpookyDesktopSpider
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.Clear(Color.Transparent);
                 g.TranslateTransform(size / 2f, size / 2f);
-                g.RotateTransform((float)angle);
-                float pulse = moving ? (float)Math.Sin(time * 66) : 0;
+                g.RotateTransform((float)(hanging ? Math.Sin(time * 1.7) * 2.2 : angle));
+                float pulse = hanging ? (float)Math.Sin(time * 2.1) * 0.22f : moving ? (float)Math.Sin(time * 66) : 0;
                 g.ScaleTransform((float)(0.8 * scale) * (1 - pulse * 0.055f),
                     (float)(0.8 * scale) * (1 + pulse * 0.055f));
                 g.TranslateTransform(-50, -55);
@@ -706,7 +784,9 @@ namespace SpookyDesktopSpider
                 EcologyChecks.Run() + "\r\n" + EcologyV11Checks.Run() + "\r\n" +
                 "PASS: " + HoverGlowChecks.Run() + " hover glow artwork/geometry assertions; " +
                 HoverIntegrationChecks.PureChecks() + " hover target validation/freshness assertions.\r\n" +
-                "PASS: " + GhostCuriosityChecks.Run() + " pure curiosity assertions; " + GhostMovementChecks.Run() + " movement priority assertions.\r\n");
+                "PASS: " + GhostCuriosityChecks.Run() + " pure curiosity assertions; " + GhostMovementChecks.Run() + " movement priority assertions.\r\n" +
+                "PASS: " + HangingChecks.Run() + " hanging engine assertions; " + HangingAcceptanceChecks.Run() + " independent hanging acceptance assertions; " +
+                TetherArtChecks.Run() + " tether rendering/geometry assertions; " + SuspensionLifecycleChecks.Run() + " session lifecycle assertions.\r\n");
             // A deterministic audit example: travel, measured arrival, deferred
             // permission, authorized construction, then revocation by a threat.
             EcologyMotion example = new EcologyMotion(new PointF(140, 100), new RectangleF(20, 20, 1880, 1040), 11);
@@ -760,6 +840,8 @@ namespace SpookyDesktopSpider
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
         [DllImport("user32.dll")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO input);
+        [DllImport("wtsapi32.dll")] public static extern bool WTSRegisterSessionNotification(IntPtr window, uint flags);
+        [DllImport("wtsapi32.dll")] public static extern bool WTSUnRegisterSessionNotification(IntPtr window);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder name, int count);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);

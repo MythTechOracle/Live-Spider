@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Drawing;
 
 namespace SpookyDesktopSpider
@@ -58,6 +59,9 @@ namespace SpookyDesktopSpider
         private double lastProgressAt = double.NegativeInfinity;
         private RouteLease approvedRoute;
         private bool holdCancelledMovement;
+        private readonly HangingMotion hanging;
+        private bool hangingEnabled;
+        private double suspensionScale = 1;
 
         private sealed class RouteLease
         {
@@ -67,6 +71,7 @@ namespace SpookyDesktopSpider
             public EcologyWeb Web;
             public PointF Anchor;
             public double Clearance;
+            public bool Egress;
         }
 
         private sealed class RejectedCorridor
@@ -103,6 +108,23 @@ namespace SpookyDesktopSpider
         public int RouteChecks { get; private set; }
         public bool Moving { get { return Speed > 0 && Distance(Position, Target) > Epsilon; } }
         public bool CuriosityHolding { get; private set; }
+        public bool HangingEnabled
+        {
+            get { return hangingEnabled; }
+            set { if (hangingEnabled == value) return; hangingEnabled = value; if (!value) CancelHanging("DISABLED"); }
+        }
+        public double HangingIdleThreshold = 600;
+        public double HangingDepth = 160;
+        public bool SuspensionActive { get { return hanging.Active; } }
+        public string SuspensionState { get { return hanging.State; } }
+        public bool TetherVisible { get { return hanging.TetherVisible; } }
+        public PointF TetherAnchor { get { return hanging.Anchor; } }
+        public PointF TetherPosition { get { return Position; } }
+        public bool HangingAnimation { get { return hanging.HangingAnimation; } }
+        public bool WebImpactPending { get { return hanging.WebImpactPending; } }
+        public double WebBounceOffset { get { return hanging.WebBounceOffset; } }
+        public ReadOnlyCollection<HangingReceipt> SuspensionLedger { get { return hanging.Ledger; } }
+        public ReadOnlyCollection<string> SuspensionReceipts { get { return hanging.Receipts; } }
 
         public EcologyMotion(PointF start, RectangleF bounds, int seed)
         {
@@ -111,6 +133,39 @@ namespace SpookyDesktopSpider
             Bounds = bounds;
             random = new Random(seed);
             Position = Target = IntendedTarget = Clamp(start);
+            hanging = new HangingMotion(RecordSuspensionReceipt);
+        }
+
+        private void RecordSuspensionReceipt(HangingReceipt receipt)
+        {
+            if (!Receipts.Contains(receipt.Outcome)) Receipts.Add(receipt.Outcome);
+            Record(receipt.Outcome, receipt.Outcome, receipt.Reason, receipt.RouteId, receipt.DecisionId, receipt.From, receipt.To);
+        }
+
+        public void CancelHanging(string reason)
+        {
+            bool released = hanging.Cancel(reason, Position, now);
+            if (!released && State != "SUSPENSION") return;
+            FinishTetherRelease(reason);
+        }
+
+        private void FinishTetherRelease(string reason)
+        {
+            EndRoute("ROUTE_CANCELLED", string.IsNullOrEmpty(reason) ? "TETHER_RELEASED" : reason);
+            RevokeWeave("TETHER_RELEASED");
+            if (CurrentWeb != null && Distance(Position, CurrentWeb.Anchor) > Epsilon) CurrentWeb.Interrupted = true;
+            Speed = 0;
+            Target = IntendedTarget = Position;
+            State = "ACTIVE_EVASION";
+            CuriosityHolding = false;
+        }
+
+        public bool ConfirmWebImpactRendered()
+        {
+            ValidatePoint(Position, "position");
+            if (!HangingEnabled || !hanging.ContextMatches(CurrentWeb, CurrentWebId, Bounds, suspensionScale, HangingDepth))
+            { if (hanging.Active) CancelHanging("IMPACT_CONTEXT_CHANGED"); return false; }
+            return hanging.ConfirmImpact(Position, CurrentWeb, CurrentWebId, Bounds, suspensionScale, HangingDepth);
         }
 
         private static bool Finite(double value)
@@ -158,6 +213,7 @@ namespace SpookyDesktopSpider
         {
             ValidateBounds(bounds);
             if (Bounds == bounds) return;
+            CancelHanging("BOUNDS_CHANGED");
             EndRoute("ROUTE_CANCELLED", "BOUNDS_CHANGED");
             RevokeWeave("BOUNDS_CHANGED");
             Bounds = bounds;
@@ -180,6 +236,7 @@ namespace SpookyDesktopSpider
         public void Recall(PointF position, RectangleF bounds)
         {
             ValidatePoint(position, "recall position");
+            CancelHanging("RECALLED");
             EndRoute("ROUTE_CANCELLED", "RECALLED");
             RevokeWeave("RECALLED");
             SetBounds(bounds);
@@ -197,6 +254,7 @@ namespace SpookyDesktopSpider
 
         public void ClearWeb()
         {
+            CancelHanging("WEB_CLEARED");
             EndRoute("ROUTE_CANCELLED", "WEB_CLEARED");
             RevokeWeave("WEB_CLEARED");
             CurrentWeb = null;
@@ -246,6 +304,7 @@ namespace SpookyDesktopSpider
 
         public void CancelMovement(string reason)
         {
+            CancelHanging(reason);
             EndRoute("ROUTE_CANCELLED", string.IsNullOrEmpty(reason) ? "CANCELLED" : reason);
             RevokeWeave("MOVEMENT_CANCELLED");
             Speed = 0;
@@ -254,10 +313,10 @@ namespace SpookyDesktopSpider
             holdCancelledMovement = true;
         }
 
-        private void ApproveRoute(PointF goal, string kind, double clearance)
+        private void ApproveRoute(PointF goal, string kind, double clearance, bool egress = false)
         {
             bool same = approvedRoute != null && approvedRoute.Kind == kind && approvedRoute.Bounds == Bounds &&
-                Distance(approvedRoute.Goal, goal) <= Epsilon && Math.Abs(approvedRoute.Clearance - clearance) <= Epsilon &&
+                Distance(approvedRoute.Goal, goal) <= Epsilon && Math.Abs(approvedRoute.Clearance - clearance) <= Epsilon && approvedRoute.Egress == egress &&
                 object.ReferenceEquals(approvedRoute.Web, CurrentWeb) &&
                 (CurrentWeb == null || Distance(approvedRoute.Anchor, CurrentWeb.Anchor) <= Epsilon);
             if (same) return;
@@ -266,7 +325,7 @@ namespace SpookyDesktopSpider
             string decision = NewDecision();
             approvedRoute = new RouteLease { Id = "route-" + (++routeSequence).ToString("D6"), DecisionId = decision,
                 Kind = kind, Start = Position, Goal = goal, Bounds = Bounds, Web = CurrentWeb,
-                Anchor = CurrentWeb == null ? Position : CurrentWeb.Anchor, Clearance = clearance };
+                Anchor = CurrentWeb == null ? Position : CurrentWeb.Anchor, Clearance = clearance, Egress = egress };
             CurrentRouteId = approvedRoute.Id;
             CurrentDecisionId = decision;
             Record("ROUTE_SELECTED", "ROUTE_APPROVED", kind, CurrentRouteId, decision, Position, goal);
@@ -301,6 +360,7 @@ namespace SpookyDesktopSpider
             bool changed = !object.ReferenceEquals(observedWeb, CurrentWeb);
             bool moved = !changed && CurrentWeb != null && Distance(observedAnchor, CurrentWeb.Anchor) > Epsilon;
             if (!changed && !moved) return;
+            if (hanging.Active) CancelHanging(changed ? "WEB_CHANGED" : "ANCHOR_CHANGED");
             EndRoute("ROUTE_CANCELLED", changed ? "WEB_CHANGED" : "ANCHOR_CHANGED");
             Speed = 0;
             Target = IntendedTarget = Position;
@@ -334,6 +394,7 @@ namespace SpookyDesktopSpider
             string reason = null;
             if (CurrentWeb == null) reason = "NO_WEB";
             else if (!object.ReferenceEquals(observedWeb, CurrentWeb) || CurrentWebId != CurrentWeb.Identity) reason = "WEB_IDENTITY_CHANGED";
+            else if (hanging.Active) reason = "SUSPENSION_ACTIVE";
             else if (!Finite(CurrentWeb.Anchor.X) || !Finite(CurrentWeb.Anchor.Y) || Clamp(CurrentWeb.Anchor) != CurrentWeb.Anchor) reason = "ANCHOR_OUTSIDE_BOUNDS";
             else if (Distance(Position, CurrentWeb.Anchor) > Epsilon) reason = "NOT_AT_ANCHOR";
             else if (Distance(Position, cursor) < 162 * scale) reason = "THREAT_NEARBY";
@@ -507,6 +568,9 @@ namespace SpookyDesktopSpider
                 (timestamp.HasValue && !Finite(timestamp.Value)) ||
                 !Finite(WanderThreshold) || !Finite(WeaveThreshold) || WanderThreshold < 0 || WeaveThreshold < 0)
                 throw new ArgumentException("Time, scale, and thresholds must be finite; scale must be positive and thresholds nonnegative.");
+            if (!Finite(HangingIdleThreshold) || HangingIdleThreshold < 0 || !Finite(HangingDepth) ||
+                (HangingDepth != 80 && HangingDepth != 160 && HangingDepth != 240))
+                throw new ArgumentException("Hanging requires a finite nonnegative idle threshold and depth 80, 160, or 240.");
             if (CurrentWeb != null)
             {
                 ValidatePoint(CurrentWeb.Anchor, "web anchor");
@@ -530,8 +594,11 @@ namespace SpookyDesktopSpider
             PointF before = Position;
             frameStart = before;
             double radius = 150 * scale, clearance = radius + 12 * scale;
+            suspensionScale = scale;
             frameClearance = clearance;
             PreThreatDistance = Distance(Position, cursor);
+            hanging.BeginFrame(Tick, ledgerTimestamp, now, Position, cursor, clearance);
+            hanging.SetRoute(CurrentRouteId, CurrentDecisionId);
             ObserveWeb();
             if (approvedRoute != null && approvedRoute.Bounds != Bounds)
             {
@@ -549,9 +616,28 @@ namespace SpookyDesktopSpider
             if (isThreatened) dangerEpisode = true;
             if (CurrentWeb != null && Distance(Position, CurrentWeb.Anchor) > Epsilon) hasBeenAway = true;
 
+            bool wasSuspended = hanging.Active;
+            bool validHangingIdentity = CurrentWeb != null && object.ReferenceEquals(observedWeb, CurrentWeb) && CurrentWebId == CurrentWeb.Id;
+            HangingIntent suspension = hanging.Prepare(HangingEnabled, HangingIdleThreshold, HangingDepth, idleSeconds, scale, now,
+                Position, cursor, Bounds, CurrentWeb, CurrentWebId, validHangingIdentity);
+            bool tetherReleasedThisFrame = wasSuspended && !hanging.Active;
+            if (tetherReleasedThisFrame) FinishTetherRelease("TETHER_RELEASED");
+
             // Intent: dangerous positions get escape intent; a safe spider never
             // continues a stale escape target back through a newly moved pointer.
-            if (isThreatened)
+            if (suspension != null)
+            {
+                RevokeWeave("SUSPENSION_ACTIVE");
+                Target = IntendedTarget = Clamp(suspension.Goal);
+                if (suspension.Speed > 0 || hanging.State == "PREPARE_DESCENT")
+                    ApproveRoute(Target, "SUSPENSION", clearance, suspension.Egress);
+                else if (approvedRoute != null) EndRoute("ROUTE_RETIRED", "SUSPENSION_STATIONARY");
+                Speed = suspension.Speed;
+                State = "SUSPENSION";
+                RouteStatus = suspension.Egress ? "VERIFIED_EGRESS" : "CLEAR";
+                hanging.SetRoute(CurrentRouteId, CurrentDecisionId);
+            }
+            else if (isThreatened)
             {
                 RevokeWeave("THREAT_NEARBY");
                 if (CurrentWeb != null) CurrentWeb.Interrupted = true;
@@ -624,6 +710,7 @@ namespace SpookyDesktopSpider
             // Effect: derive a bounded candidate before committing real position.
             if (Speed > 0 && !ExecutedIntentMatchesLease(clearance))
             {
+                if (hanging.Active) CancelHanging("EXECUTION_INTENT_CHANGED");
                 EndRoute("ROUTE_CANCELLED", "EXECUTION_INTENT_CHANGED");
                 Speed = 0;
                 Target = IntendedTarget = Position;
@@ -644,13 +731,15 @@ namespace SpookyDesktopSpider
                 double travel = Math.Min(remaining, Speed * dt);
                 PointF candidate = Clamp(new PointF(Position.X + (float)((Target.X - Position.X) * travel / remaining),
                     Position.Y + (float)((Target.Y - Position.Y) * travel / remaining)));
-                if (State == "ESCAPE" || SegmentDistance(Position, candidate, cursor) + Epsilon >= clearance)
+                if (State == "ESCAPE" || SegmentDistance(Position, candidate, cursor) + Epsilon >= clearance ||
+                    (State == "SUSPENSION" && approvedRoute.Egress && HangingMotion.IsSafeEgressStep(Position, candidate, Target, cursor, clearance)))
                 {
                     Position = candidate;
                     wantedRotation = Math.Atan2(Position.Y - before.Y, Position.X - before.X) * 180 / Math.PI + 90;
                 }
                 else
                 {
+                    if (hanging.Active) CancelHanging("CANDIDATE_SEGMENT_UNSAFE");
                     EndRoute("ROUTE_CANCELLED", "CANDIDATE_SEGMENT_UNSAFE");
                     CurrentDecisionId = NewDecision();
                     Speed = 0;
@@ -683,6 +772,15 @@ namespace SpookyDesktopSpider
             }
             if (CurrentWeb != null && Distance(Position, CurrentWeb.Anchor) > Epsilon) hasBeenAway = true;
             bool arrived = Distance(Position, Target) <= Epsilon;
+            bool suspendedReturn = hanging.VerifyEffect(Position, dt, now, PostThreatDistance, CurrentRouteId, CurrentDecisionId);
+            if (suspendedReturn)
+            {
+                EndRoute("ROUTE_RETIRED", "HANGING_HOME_REACHED");
+                hasBeenAway = false;
+                if (CurrentWeb != null) CurrentWeb.Interrupted = false;
+                Speed = 0;
+                Target = IntendedTarget = Position;
+            }
             if (arrived && safe && movementState == "SELECT_ANCHOR" && State != "WAIT_FOR_ROUTE")
             {
                 CurrentWeb = new EcologyWeb { Anchor = Position, Progress = 0, Interrupted = false };
@@ -708,7 +806,7 @@ namespace SpookyDesktopSpider
             }
             bool weaveAllowed = CanWeave(cursor, idleSeconds, scale);
             if (State == "WEAVE" && !weaveAllowed) State = "ACTIVE_EVASION";
-            if (State == "WEAVE" && weaveAllowed)
+            if (State == "WEAVE" && weaveAllowed && !tetherReleasedThisFrame)
             {
                 double previousProgress = CurrentWeb.Progress;
                 CurrentWeb.Progress += dt;
